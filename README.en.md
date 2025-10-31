@@ -13,7 +13,7 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 **Ground Truth:**  
 [▶️ Listen](sample_wav/ground_truth.wav)
 
-**生成された音声:**  
+**Synthesized Voice:**  
 [▶️ Listen](sample_wav/inference_wav.wav)
 
 ## Features
