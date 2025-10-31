@@ -1,0 +1,98 @@
+# config.yaml
+
+seed: 42
+device: "cuda"         # "cuda" | "cpu"
+
+preprocess:
+  # パス設定
+  raw_wav_dir: 'dataset/raw_wavs'
+  resample_wav_dir: 'dataset/wav_44100'
+  cut_wav_dir: 'dataset/cut_wavs'
+  f0_img_dir: 'dataset/f0_imgs'
+  npz_dir: 'dataset/npz'
+  prefix: "savename"
+
+  # 音声設定
+  sample_rate: 44100
+  scale: 1.0
+  f0_min: 150.0
+  f0_max: 800.0
+  frame_size: 256
+
+  # 無音カット設定
+  min_silence_len: 250
+  silence_thresh: -50
+  keep_silence: 250
+
+  # メルスペクトログラム設定
+  fft_size: 4096
+  hop_size: 256
+  mel_dim: 128
+  mel_min: 40.0
+  mel_max: 22050.0
+  align_f0_to_spec: true # F0のフレームをメルスペクトログラムの中心揃えフレームに合わせる
+  min_level_db: -10.0
+
+  # データフィルタリング設定
+  data_filtering:
+    min_frames: 150
+    max_frames: 2500
+    backup_dir: 'dataset/npz_backup'
+
+# 共通で使用するパラメータ
+common_params: &common_params
+  hop_size: 256
+  in_channels: 128
+  conv_channels: 256
+  kernel_size: 3
+  dilation_size: 1
+  group_size: 8
+  use_causal: false
+
+model:
+  # NeuralHomomorphicVocoder 自体の設定
+  vocoder:
+    <<: *common_params  # 共通パラメータを展開
+    sample_rate: 44100
+    noise_std: 0.03
+    use_weight_norm: true
+    conv_type: "original"
+
+  # CCepLTVFilter の設定
+  ltv_filter:
+    ccep_size: 444
+    fft_size: 2048
+    window_size: 1024
+    use_zero_mask: true
+    n_ltv_layers: 3
+
+training:
+  frame_size: 256
+  train_dir: 'dataset/training/train'
+  test_dir: 'dataset/training/test'
+  log_dir: './logs'
+  snapshot_dir: 'snapshots'
+  lr_g: 0.0001
+  lr_d: 0.0002
+  batch_size: 1
+  shuffle: True
+  num_workers: 2
+  adversarial_start: 201
+  adversarial_scale: 3
+  feature_matching_scale: 10
+  save_interval: 10
+  n_epoch: 1001
+  snapshot_path: None
+  window_lengths:
+    - 256
+    - 512
+    - 768
+    - 1024
+    - 1280
+    - 1536
+    - 1792
+    - 2048
+    - 3072
+    - 4096
+    - 6144
+    - 8192
