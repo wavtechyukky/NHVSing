@@ -77,8 +77,8 @@ python train.py
 学習済みモデル（スナップショット）を、推論で使用できる形式（`.pth`, `.pt`, `.onnx`）にエクスポートします。
 
 ```bash
-# 例: 990エポック時点のスナップショットをエクスポートする場合
-python export.py --checkpoint snapshots_normal/000990epoch.pth --config config.yaml
+# 例: 1000エポック時点のスナップショットをエクスポートする場合
+python export.py --checkpoint snapshots_normal/001000epoch.pth --config config.yaml
 ```
 
 ### 4. 推論
