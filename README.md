@@ -10,11 +10,11 @@
 
 ## 音声サンプル
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth.wav"></audio>
+**Ground Truth:**  
+[▶️ Listen](sample_wav/ground_truth.wav)
 
-**生成された音声:**
-<audio controls src="sample_wav/inference_wav.wav"></audio>
+**生成された音声:**  
+[▶️ Listen](sample_wav/inference_wav.wav)
 
 ## 特徴
 
