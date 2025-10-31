@@ -5,67 +5,92 @@ import numpy as np
 import torch
 import argparse
 import onnxruntime as ort
+import sys
 
 # --- モデルのインポート ---
-# プロジェクトのルートから実行することを想定
+# プロジェクトルートをPythonパスに追加
+project_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(project_root))
+
 import model
-import refactored_model
 from dsp import generate_impulse_train, complex_cepstrum_to_imp, ltv_fir
 from model import repeat_interpolate
+from inference_onnx import NHVSing_with_ONNX as NHVSing_ONNX_NumPy_Backend
 
 # --- 設定とパス ---
 CONFIG_PATH = "config.yaml"
-# ONNXモデルのパス
-ONNX_MODEL_PATH = "debug/nhvsing_convs.onnx"
+ONNX_MODEL_PATH = "exported_models/core_model.onnx"
+JIT_MODEL_PATH = "exported_models/model_jit.pt"
+PYTORCH_MODEL_PATH = "exported_models/model.pth"
 
-# --- ONNXランタイムを使った推論モデルの定義 ---
 
-class NHVSingWithONNXRuntime:
-    """
-    畳み込み部分をONNXランタイムで実行するNHVSingのラッパークラス。
-    refactored_model.NHVSingRefactoredのDSP部分を再利用します。
-    """
+# --- モデルラッパークラスの定義 ---
+
+class NHVSingPyTorch:
+    """標準的なPyTorchモデルのラッパー"""
+    def __init__(self, vocoder_cfg, ltv_filter_cfg, model_path):
+        self.model = model.NHVSing(vocoder_cfg, ltv_filter_cfg)
+        self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
+        self.model.eval()
+        self.noise_std = vocoder_cfg['noise_std']
+        self.hop_size = vocoder_cfg['hop_size']
+
+    def to(self, device):
+        self.model.to(device)
+        return self
+
+    def __call__(self, x, cf0):
+        return self.model(x, cf0)
+
+class NHVSingJIT:
+    """JITコンパイル済みモデルのラッパー"""
+    def __init__(self, vocoder_cfg, ltv_filter_cfg, model_path, device='cpu'):
+        self.model = torch.jit.load(model_path, map_location=device)
+        self.model.eval()
+        self.device = device
+        # JITモデルはノイズ生成を内包していると仮定
+    
+    def to(self, device):
+        # JITモデルはロード時にデバイスが決定される
+        if self.device != device:
+            print(f"Warning: JIT model was loaded on {self.device}, requested {device}.")
+        return self
+
+    def __call__(self, x, cf0):
+        return self.model(x, cf0)
+
+class NHVSing_ONNX_PyTorchDSP:
+    """ONNX + PyTorch DSPモデルのラッパー"""
     def __init__(self, vocoder_cfg, ltv_filter_cfg, onnx_path, device='cpu'):
-        print("Initializing NHVSingWithONNXRuntime")
         self.device = device
         self.fs = vocoder_cfg['sample_rate']
         self.hop_size = vocoder_cfg['hop_size']
         self.fft_size = ltv_filter_cfg['fft_size']
         self.noise_std = vocoder_cfg['noise_std']
-
-        # ONNXランタイムセッションを初期化
-        print(f"Loading ONNX model from: {onnx_path}")
+        
         providers = ['CPUExecutionProvider']
         if device == 'cuda':
             providers.insert(0, 'CUDAExecutionProvider')
         self.ort_session = ort.InferenceSession(onnx_path, providers=providers)
-        print(f"ONNX session created for device: {self.ort_session.get_providers()}")
-
-        # DSP関数
-        self.impulse_generator = generate_impulse_train
 
     def to(self, device):
-        """デバイス転送用のダミーメソッド"""
-        self.device = device
-        # Note: ONNX Runtimeセッションのデバイスは初期化時に決定される
+        # ONNX Runtimeセッションのデバイスは初期化時に決定
+        if self.device != device:
+             print(f"Warning: ONNX (PyTorch DSP) model was loaded on {self.device}, requested {device}.")
         return self
 
     def __call__(self, x, cf0):
-        """推論実行"""
-        # ノイズを生成
         z_shape = (x.size(0), 1, x.size(1) * self.hop_size)
         z = torch.normal(0, self.noise_std, z_shape).to(self.device)
 
-        # --- Part 1: ONNXランタイムでの畳み込み実行 ---
         ort_inputs = {self.ort_session.get_inputs()[0].name: x.cpu().numpy()}
         ccep_harm_np, ccep_noise_np = self.ort_session.run(None, ort_inputs)
         
         ccep_harm = torch.from_numpy(ccep_harm_np).to(self.device)
         ccep_noise = torch.from_numpy(ccep_noise_np).to(self.device)
 
-        # --- Part 2: PyTorchでのDSP処理 ---
         cf0_resampled = repeat_interpolate(cf0, self.hop_size)
-        harmonic_source = self.impulse_generator(cf0_resampled, 200, float(self.fs))
+        harmonic_source = generate_impulse_train(cf0_resampled, 200, float(self.fs))
 
         imp_harm = complex_cepstrum_to_imp(ccep_harm, self.fft_size)
         sig_harm = ltv_fir(harmonic_source, imp_harm, self.hop_size)
@@ -74,61 +99,63 @@ class NHVSingWithONNXRuntime:
         sig_noise = ltv_fir(z, imp_noise, self.hop_size)
         
         y = sig_harm + sig_noise
-        y = torch.clamp(y, -1, 1)
+        return torch.clamp(y, -1, 1).reshape(x.size(0), -1)
+
+class NHVSing_ONNX_NumPyDSP:
+    """ONNX + NumPy DSPモデルのラッパー"""
+    def __init__(self, vocoder_cfg, ltv_filter_cfg, onnx_path, device='cpu'):
+        self.model = NHVSing_ONNX_NumPy_Backend(onnx_path, vocoder_cfg, ltv_filter_cfg)
+        self.noise_std = vocoder_cfg['noise_std']
+        self.hop_size = vocoder_cfg['hop_size']
+        # NumPyバックエンドはCPUでのみ動作
+        self.device = 'cpu'
+
+    def to(self, device):
+        if device != 'cpu':
+            print("Warning: ONNX+NumPy backend only runs on CPU.")
+        return self
+
+    def __call__(self, x, cf0):
+        z_shape = (x.size(0), 1, x.size(1) * self.hop_size)
+        z = torch.normal(0, self.noise_std, z_shape)
+
+        x_np = x.cpu().numpy()
+        cf0_np = cf0.cpu().numpy()
+        z_np = z.cpu().numpy()
+
+        y_np = self.model.inference(z_np, x_np, cf0_np)
         
-        return y.reshape(x.size(0), -1)
+        return torch.from_numpy(y_np).to(x.device)
 
+# --- ベンチマーク実行関数 ---
 
-def benchmark(model_class, model_name, vocoder_cfg, ltv_filter_cfg, npz_data, device):
-    """指定されたモデルの推論速度を計測する"""
-    print(f"--- Benchmarking: {model_name} ---")
-    
-    # モデルの初期化
-    if model_name == "NHVSing_with_ONNX":
-        model = model_class(vocoder_cfg, ltv_filter_cfg, ONNX_MODEL_PATH, device)
-    else:
-        model = model_class(vocoder_cfg, ltv_filter_cfg)
-    
+def benchmark(model, model_name, npz_data, sample_rate, device):
+    print(f"--- Benchmarking: {model_name} on {device.upper()} ---")
     model.to(device)
     
-    # 入力データを準備
     log_melspc = torch.from_numpy(npz_data['log_melspc']).unsqueeze(0).float().to(device)
     f0 = torch.from_numpy(npz_data['f0']).unsqueeze(0).unsqueeze(0).float().to(device)
-    
-    # ノイズはNHVSingのオリジナル版のみ必要
-    noise = None
-    if model_name == "NHVSing (Original)":
-        noise_shape = (1, 1, log_melspc.size(1) * vocoder_cfg['hop_size'])
-        noise = torch.normal(0, vocoder_cfg['noise_std'], noise_shape).to(device)
 
-    # ウォームアップ実行
+    # ウォームアップ
     print("Running warmup inference...")
     with torch.no_grad():
-        if model_name == "NHVSing (Original)":
-            _ = model(noise, log_melspc, f0)
-        else:
-            _ = model(log_melspc, f0)
+        _ = model(log_melspc, f0)
 
-    # ベンチマーク実行
-    iterations = 20
+    # ベンチマーク
+    iterations = 50
     timings = []
     rtfs = []
     print(f"Running benchmark ({iterations} iterations)...")
     for i in range(iterations):
         start_time = time.time()
         with torch.no_grad():
-            if model_name == "NHVSing (Original)":
-                y = model(noise, log_melspc, f0)
-            else:
-                y = model(log_melspc, f0)
+            y = model(log_melspc, f0)
         end_time = time.time()
         
-        # 計測結果を保存
         inference_time = end_time - start_time
         timings.append(inference_time)
         
-        # RTFを計算
-        audio_duration = y.shape[-1] / vocoder_cfg['sample_rate']
+        audio_duration = y.shape[-1] / sample_rate
         rtf = inference_time / audio_duration
         rtfs.append(rtf)
 
@@ -139,61 +166,66 @@ def benchmark(model_class, model_name, vocoder_cfg, ltv_filter_cfg, npz_data, de
     
     print(f"Result: {avg_time*1000:.2f} ± {std_time*1000:.2f} ms per inference")
     print(f"        RTF: {avg_rtf:.4f} ± {std_rtf:.4f}")
-    print("-" * (20 + len(model_name)))
+    print("-" * (30 + len(model_name) + len(device)))
     return avg_time, avg_rtf
 
+# --- メイン処理 ---
+
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark inference speed of different NHVSing models.")
-    parser.add_argument("npz_path", type=str, help="Path to the input .npz file for benchmarking.")
-    parser.add_argument("--device", type=str, default=None, help="Device to run on (e.g., 'cpu', 'cuda'). Defaults to cuda if available.")
+    parser = argparse.ArgumentParser(description="Benchmark inference speed of NHVSing models.")
+    parser.add_argument("npz_path", type=str, help="Path to the input .npz file.")
+    parser.add_argument("--device", type=str, default=None, help="Device: 'cpu' or 'cuda'. Auto-detects if not set.")
     args = parser.parse_args()
 
-    npz_path = Path(args.npz_path)
-    if not npz_path.exists():
-        print(f"エラー: 指定されたNPZファイルが見つかりません: {npz_path}")
+    if not Path(args.npz_path).exists():
+        print(f"Error: NPZ file not found: {args.npz_path}")
         return
 
-    # 設定ファイルを読み込み
     with open(CONFIG_PATH, "r") as f:
         cfg = yaml.safe_load(f)
     
-    print(f"Using NPZ file: {npz_path}")
-    npz_data = np.load(npz_path)
+    npz_data = np.load(args.npz_path)
+    vocoder_cfg = cfg['model']['vocoder']
+    ltv_filter_cfg = cfg['model']['ltv_filter']
 
-    # デバイスを設定
     if args.device:
         device = args.device
     else:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    
+    print(f"Benchmarking on device: {device.upper()}")
+    print("-" * 60)
 
-    # ベンチマーク対象のモデル
-    models_to_benchmark = [
-        (model.NHVSing, "NHVSing (Original)"),
-        (refactored_model.NHVSingRefactored, "NHVSingRefactored"),
-        (NHVSingWithONNXRuntime, "NHVSing_with_ONNX"),
-    ]
+    models_to_benchmark = {
+        "PyTorch": NHVSingPyTorch(vocoder_cfg, ltv_filter_cfg, PYTORCH_MODEL_PATH),
+        "JIT": NHVSingJIT(vocoder_cfg, ltv_filter_cfg, JIT_MODEL_PATH, device),
+        "ONNX+PyTorchDSP": NHVSing_ONNX_PyTorchDSP(vocoder_cfg, ltv_filter_cfg, ONNX_MODEL_PATH, device),
+        "ONNX+NumPyDSP": NHVSing_ONNX_NumPyDSP(vocoder_cfg, ltv_filter_cfg, ONNX_MODEL_PATH, device),
+    }
 
     results = {}
-    for model_cls, name in models_to_benchmark:
+    for name, model_instance in models_to_benchmark.items():
+        # NumPyバックエンドはCPUでのみ実行
+        bench_device = 'cpu' if name == "ONNX+NumPyDSP" else device
         try:
-            avg_time, avg_rtf = benchmark(model_cls, name, cfg['model']['vocoder'], cfg['model']['ltv_filter'], npz_data, device)
+            avg_time, avg_rtf = benchmark(model_instance, name, npz_data, vocoder_cfg['sample_rate'], bench_device)
             results[name] = (avg_time, avg_rtf)
         except Exception as e:
-            print(f"エラー: {name} のベンチマーク中にエラーが発生しました: {e}")
+            print(f"Error during {name} benchmark: {e}")
+            import traceback
+            traceback.print_exc()
             results[name] = (-1, -1)
 
-    print("\n--- Benchmark Summary ---")
+    print("\n" + "="*22 + " Benchmark Summary " + "="*21)
     print(f"Device: {device.upper()}")
-    print(f"{ 'Model':<25} | {'Avg Time (ms)':<15} | {'Avg RTF':<15}")
+    print(f"{'Model':<20} | {'Avg Time (ms)':<15} | {'Avg RTF':<15}")
     print("-" * 60)
     for name, (avg_time, avg_rtf) in results.items():
         if avg_time != -1:
-            print(f"{name:<25} | {avg_time*1000:<15.2f} | {avg_rtf:<15.4f}")
+            print(f"{name:<20} | {avg_time*1000:<15.2f} | {avg_rtf:<15.4f}")
         else:
-            print(f"{name:<25} | {'FAILED':<15} | {'FAILED':<15}")
-    print("-" * 60)
-
+            print(f"{name:<20} | {'FAILED':<15} | {'FAILED':<15}")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()

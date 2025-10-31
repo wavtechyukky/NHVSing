@@ -16,7 +16,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dsp import frame_center_log_mel_spectrogram
-from refactored_model import NHVSingRefactored
+from model import NHVSing
 from inference_onnx import NHVSing_with_ONNX
 from model import repeat_interpolate # For hybrid model
 from dsp import generate_impulse_train, complex_cepstrum_to_imp, ltv_fir # For hybrid model
@@ -171,7 +171,7 @@ class HybridONNXPyTorchModel(torch.nn.Module):
         ccep_harm = torch.from_numpy(ccep_harm_np).to(x.device)
         ccep_noise = torch.from_numpy(ccep_noise_np).to(x.device)
 
-        # --- PyTorch DSP Processing (copied from NHVSingRefactored) ---
+        # --- PyTorch DSP Processing (copied from NHVSing) ---
         cf0_resampled = repeat_interpolate(cf0, self.hop_size)
         harmonic_source = generate_impulse_train(cf0_resampled, 200, float(self.fs))
 
@@ -223,7 +223,7 @@ def main():
     # 1. PTH model
     if args.pth_path:
         print("\n--- Running PTH Inference ---")
-        model = NHVSingRefactored(cfg['model']['vocoder'], cfg['model']['ltv_filter'])
+        model = NHVSing(cfg['model']['vocoder'], cfg['model']['ltv_filter'])
         model.load_state_dict(torch.load(args.pth_path, map_location='cpu'))
         model.remove_weight_norm()
         model.to(device)

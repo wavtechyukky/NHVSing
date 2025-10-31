@@ -8,7 +8,7 @@ import argparse
 from pathlib import Path
 
 # Assuming refactored_model.py is in the same root directory
-from refactored_model import NHVSingRefactored
+from model import NHVSing
 
 def load_config(path):
     """Loads a YAML configuration file."""
@@ -17,7 +17,7 @@ def load_config(path):
 
 def main(npz_path, output_wav_path, onnx_path=None):
     """
-    Instantiates NHVSingRefactored, runs inference on an NPZ file,
+    Instantiates NHVSing, runs inference on an NPZ file,
     saves the output audio, and optionally exports the conv part to ONNX.
     """
     # 1. Load config
@@ -27,8 +27,8 @@ def main(npz_path, output_wav_path, onnx_path=None):
     preprocess_cfg = cfg['preprocess']
 
     # 2. Instantiate model
-    print("Instantiating NHVSingRefactored model...")
-    model = NHVSingRefactored(
+    print("Instantiating NHVSing model...")
+    model = NHVSing(
         vocoder_cfg=model_cfg['vocoder'],
         ltv_filter_cfg=model_cfg['ltv_filter']
     )
@@ -94,7 +94,7 @@ def main(npz_path, output_wav_path, onnx_path=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Check the initial state of the NHVSingRefactored model and optionally export to ONNX."
+        description="Check the initial state of the NHVSing model and optionally export to ONNX."
     )
     parser.add_argument(
         "npz_path", 
