@@ -62,11 +62,11 @@ WAVファイルからモデルの学習に必要な特徴量（npz形式）を�
 python preprocess.py --step all
 ```
 
-前処理が完了したら、`dataset/npz`ディレクトリに生成されたnpzファイルを、`dataset/training_normal`（学習用）と`dataset/inference`（検証用）の各フォルダに手動で振り分けてください。
+前処理が完了したら、`dataset/npz`ディレクトリに生成されたnpzファイルを、`dataset/training/train`（学習用）と`dataset/training/test`（検証用）の各フォルダに手動で振り分けてください。
 
 ### 2. 学習
 
-モデルの学習を開始します。`config.yaml`がデフォルトの状態では、学習の進行状況や各種ログは`logs_normal`に、モデルのスナップショットは`snapshots_normal`に保存されます。
+モデルの学習を開始します。`config.yaml`がデフォルトの状態では、学習の進行状況や各種ログは`logs`に、モデルのスナップショットは`snapshots`に保存されます。
 
 ```bash
 python train.py
