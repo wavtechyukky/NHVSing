@@ -10,11 +10,11 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth.wav"></audio>
+**Ground Truth:**  
+[▶️ Listen](sample_wav/ground_truth.wav)
 
-**Synthesized Voice:**
-<audio controls src="sample_wav/inference_wav.wav"></audio>
+**生成された音声:**  
+[▶️ Listen](sample_wav/inference_wav.wav)
 
 ## Features
 
