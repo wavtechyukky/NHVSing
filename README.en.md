@@ -64,11 +64,11 @@ Extracts the features (in npz format) required for model training from WAV files
 python preprocess.py --step all
 ```
 
-After preprocessing is complete, manually distribute the npz files generated in the `dataset/npz` directory into the `dataset/training_normal` (for training) and `dataset/inference` (for validation) folders.
+After preprocessing is complete, manually distribute the npz files generated in the `dataset/npz` directory into the `dataset/training/train` (for training) and `dataset/training/test` (for validation) folders.
 
 ### 2. Training
 
-Starts model training. With the default `config.yaml`, the training progress and various logs are saved in `logs_normal`, and model snapshots are saved in `snapshots_normal`.
+Starts model training. With the default `config.yaml`, the training progress and various logs are saved in `logs`, and model snapshots are saved in `snapshots`.
 
 ```bash
 python train.py
