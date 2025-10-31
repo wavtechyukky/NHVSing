@@ -79,8 +79,8 @@ python train.py
 Exports the trained model (snapshot) into formats that can be used for inference (`.pth`, `.pt`, `.onnx`).
 
 ```bash
-# Example: Exporting the snapshot from epoch 990
-python export.py --checkpoint snapshots_normal/000990epoch.pth --config config.yaml
+# Example: Exporting the snapshot from epoch 1000
+python export.py --checkpoint snapshots_normal/001000epoch.pth --config config.yaml
 ```
 
 ### 4. Inference
