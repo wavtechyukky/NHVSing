@@ -52,7 +52,7 @@ class NHVSing(nn.Module):
     def forward(self, x, cf0):
         """
         Args:
-            x: (B, T, D) - Mel-cepstrum
+            x: (B, T, D) - Mel Spectrogram
             cf0: (B, 1, T) - Continuous F0
         
         Returns:
