@@ -56,19 +56,26 @@ def evaluate(model, test_loader, loss_fn, cfg, device, writer, epoch):
             wav = torch.from_numpy(wav).to(device)
             mask = mask.to(device)
 
-            output = model(log_melspc, f0).masked_fill(mask, 0)
+            output = model(log_melspc, f0) # output is [batch_size, n_sample]
+            del f0, log_melspc
+
+            output = output.unsqueeze(1) # Make it [batch_size, 1, n_sample]
+            output = output.masked_fill(mask.unsqueeze(1), 0)
             
-            est_source = torch.masked_select(output, torch.logical_not(mask)).view(1, 1, -1)
-            wav_for_loss = torch.masked_select(wav, torch.logical_not(mask)).view(1, 1, -1)
+            wav = wav.unsqueeze(1) # Make it [batch_size, 1, n_sample]
+            wav_for_loss = wav.masked_fill(mask.unsqueeze(1), 0)
+            del wav, mask
             
             stft_loss = loss_fn(
-                est_source, wav_for_loss, fft_lengths,
+                output, wav_for_loss, fft_lengths,
                 window_lengths, hop_lengths, 'log_linear'
             )
             stft_loss_eval += stft_loss.item()
+            del stft_loss, wav_for_loss
 
-            output = torch.squeeze(output).to('cpu').detach().numpy().copy()
-            writer.add_audio('test/' + str(i), output, global_step=epoch, sample_rate=int(44100))
+            output_cpu = torch.squeeze(output).to('cpu').detach().numpy().copy()
+            writer.add_audio('test/' + str(i), output_cpu, global_step=epoch, sample_rate=int(44100))
+            del output, output_cpu
             i += 1
 
     model.train()
@@ -81,15 +88,20 @@ def inference(model, npz_path, device, writer, epoch, cfg):
     with torch.no_grad():
         data = np.load(npz_path)
 
-        f0, _ = norm_interp_f0(data['f0'])
-        f0 = f0[np.newaxis][np.newaxis]
-        log_melspc = data['log_melspc'][np.newaxis]
+        f0_np, _ = norm_interp_f0(data['f0'])
+        f0_np = f0_np[np.newaxis][np.newaxis]
+        log_melspc_np = data['log_melspc'][np.newaxis]
+        del data
 
-        f0 = torch.Tensor(f0).to(device)
-        log_melspc = torch.Tensor(log_melspc).to(device)
+        f0 = torch.Tensor(f0_np).to(device)
+        log_melspc = torch.Tensor(log_melspc_np).to(device)
+        del f0_np, log_melspc_np
 
-        synthesized = model(log_melspc, f0)
-        synthesized = torch.squeeze(synthesized).to('cpu').detach().numpy().copy()
+        synthesized_tensor = model(log_melspc, f0)
+        del f0, log_melspc
+
+        synthesized = torch.squeeze(synthesized_tensor).to('cpu').detach().numpy().copy()
+        del synthesized_tensor
 
     model.train()
     return synthesized
@@ -99,7 +111,8 @@ def inference_test_data(model, device, writer, epoch, cfg):
     test_npz_path_list = glob.glob(os.path.join(test_data_folder, '**/*.npz'), recursive=True)
     
     # Create save directory
-    save_dir = Path(f"dataset/inference/{epoch}")
+    inference_output_base_dir = Path(cfg['training'].get('inference_output_dir', 'dataset/inference'))
+    save_dir = inference_output_base_dir / f"{epoch}"
     save_dir.mkdir(parents=True, exist_ok=True)
     
     for i, test_npz_path in enumerate(test_npz_path_list):
@@ -180,12 +193,15 @@ def run(args):
             log_melspc = torch.from_numpy(log_melspc).to(device)
             wav = torch.from_numpy(wav).to(device)
             mask = mask.to(device)
-            
-            est_source = model(log_melspc, f0)
+
+            est_source = model(log_melspc, f0) # This outputs [batch_size, n_sample]
+            est_source = est_source.unsqueeze(1) # Make it [batch_size, 1, n_sample]
+
+            wav = wav.unsqueeze(1) # Make it [batch_size, 1, n_sample]
+
+            # Apply masking correctly
             est_source = est_source.masked_fill(mask.unsqueeze(1), 0)
-            
-            est_source = torch.masked_select(est_source, torch.logical_not(mask)).view(1, 1, -1)
-            wav = torch.masked_select(wav, torch.logical_not(mask)).view(1, 1, -1)
+            wav = wav.masked_fill(mask.unsqueeze(1), 0)
 
             optimizer_g.zero_grad()
             optimizer_d.zero_grad()
@@ -197,9 +213,11 @@ def run(args):
             )
             total_loss = total_loss + stft_loss
             stft_loss_epoch += stft_loss.item()
+            del stft_loss
             
             if epoch > adversarial_start:
                 est_p = discriminator(est_source)
+                
                 adversarial_loss = 0.0
                 for ii in range(len(est_p)):
                     adversarial_loss += nn.MSELoss()(est_p[ii][-1], est_p[ii][-1].new_ones(est_p[ii][-1].size()))
@@ -215,9 +233,12 @@ def run(args):
                 feature_map_loss /= (float(len(est_p)) * float(len(est_p[0]) - 1))
                 total_loss = total_loss + feature_map_loss * feature_matching_scale
                 loss_f_epoch += feature_map_loss.item()
+                
+                del est_source, adversarial_loss, feature_map_loss, est_p, p # Grouped deletion
             
             loss_g_epoch += total_loss.item()
             total_loss.backward()
+            del total_loss
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_g.step()
 
@@ -225,8 +246,13 @@ def run(args):
                 optimizer_d.zero_grad()
                 with torch.no_grad():
                     est_source_for_d = model(log_melspc, f0)
+                    est_source_for_d = est_source_for_d.unsqueeze(1) # Make it [batch_size, 1, n_sample]
+                    est_source_for_d = est_source_for_d.masked_fill(mask.unsqueeze(1), 0) # Apply mask
+                
+                del log_melspc, f0, mask
+
                 p = discriminator(wav)
-                est_p_for_d = discriminator(est_source_for_d.unsqueeze(1).detach())
+                est_p_for_d = discriminator(est_source_for_d.detach())
                 real_loss = 0.0
                 fake_loss = 0.0
                 for ii in range(len(p)):
@@ -241,6 +267,9 @@ def run(args):
                 discriminator_loss.backward()
                 nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
                 optimizer_d.step()
+
+                del est_source_for_d, p, est_p_for_d, real_loss, fake_loss, discriminator_loss # Grouped deletion
+            del wav
         
         toc = time.time()
 

@@ -83,6 +83,7 @@ training:
   save_interval: 10
   n_epoch: 1001
   snapshot_path: None
+  inference_output_dir: 'dataset/inference'
   window_lengths:
     - 256
     - 512
