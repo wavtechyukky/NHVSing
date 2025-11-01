@@ -24,6 +24,24 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 *   **High Fidelity:** Faithfully reproduces the speaker's voice quality.
 *   **Stable Quality:** Synthesizes stably without artifacts, even for long tones, staying true to the fundamental frequency (F0).
 
+The Real-Time Factor (RTF) and average inference time of this vocoder were measured under the following environment and conditions.
+
+- **Measurement Environment:** Google Colab (CPU runtime)
+- **CPU:** Intel(R) Xeon(R) CPU @ 2.20GHz (6 Cores / 12 Threads)
+- **Measurement Conditions:**
+    - Input Audio Sampling Rate: 44.1kHz
+    - Input Audio Length: Approx. 6 seconds
+    - Batch Size: 1
+
+| Model Type            | Device | Avg. Inference Time | RTF      |
+|-----------------------|--------|---------------------|----------|
+| Native Python         | CPU    | 0.437235 sec        | 0.067795 |
+| JIT Script            | CPU    | 0.419325 sec        | 0.065018 |
+| ONNX + PyTorch Hybrid | CPU    | 0.442845 sec        | 0.068665 |
+| Native Python         | CUDA   | 0.018330 sec        | 0.002842 |
+| JIT Script            | CUDA   | 0.018066 sec        | 0.002801 |
+| ONNX + PyTorch Hybrid | CUDA   | 0.439932 sec        | 0.068214 |
+
 ### Differences from the Original Implementation
 The following points have been changed from the implementation in the original paper (some parameters can be edited in `config.yaml`):
 
