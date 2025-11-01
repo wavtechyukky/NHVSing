@@ -24,6 +24,24 @@
 *   **高い再現性:** 話者の声質を忠実に再現します。
 *   **安定した品質:** F0（基本周波数）に忠実で、ロングトーンも破綻なく安定して合成できます。
 
+本ボコーダーのRTF（Real-Time Factor）および平均推論時間は、以下の環境と条件で測定されました。
+
+- **測定環境:** Google Colab (CPUランタイム)
+- **CPU:** Intel(R) Xeon(R) CPU @ 2.20GHz (6コア / 12スレッド)
+- **測定条件:**
+    - 入力音声サンプリングレート: 44.1kHz
+    - 入力音声の長さ: 約6秒
+    - バッチサイズ: 1
+
+| Model Type            | Device | Avg. Inference Time | RTF      |
+|-----------------------|--------|---------------------|----------|
+| Native Python         | CPU    | 0.437235 sec        | 0.067795 |
+| JIT Script            | CPU    | 0.419325 sec        | 0.065018 |
+| ONNX + PyTorch Hybrid | CPU    | 0.442845 sec        | 0.068665 |
+| Native Python         | CUDA   | 0.018330 sec        | 0.002842 |
+| JIT Script            | CUDA   | 0.018066 sec        | 0.002801 |
+| ONNX + PyTorch Hybrid | CUDA   | 0.439932 sec        | 0.068214 |
+
 ### オリジナル実装との差異
 元の論文の実装から以下の点を変更しています。（一部のパラメータはconfig.yamlから編集可能）
 
