@@ -1,0 +1,46 @@
+# Logs and checkpoints
+logs*/
+snapshots*/
+*.log
+
+# Dataset files
+dataset/
+*.npz
+*.npy
+wav.zip
+*_wav_length.txt
+
+# Model outputs
+*.onnx
+*.pt
+*.pth
+output*.wav
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+*.ipynb
+
+# macOS
+.DS_Store
+
+# Notebooks output (keep .ipynb files but ignore checkpoints)
+.ipynb_checkpoints/
+
+# Temp / experiment outputs
+cepstrum_comparison.png
+inference_test/
+m4singer_onnx_test*/
+paper/
+encodec-main/
+
+# Development notes (not for public)
+CHANGELOG.md
+
+# Old reference code
+20260302/
+
+# Training result folders (e.g. kiritan_1000epoch/)
+*epoch/

@@ -104,6 +104,31 @@ def generate_impulse_train(
     source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
     return source * 0.01
 
+def envelope_loss(y: Tensor, y_hat: Tensor, kernel_size: int, stride: int) -> Tensor:
+    """Amplitude envelope MAE loss (RefineGAN §2.5.1, eq.2).
+    Extracts upper and lower envelopes via 1D max-pooling and computes MAE.
+    Penalises jagged/rough amplitude envelopes in the generated waveform.
+
+    Args:
+        y, y_hat: [n_batch, 1, n_sample]
+        kernel_size: max-pool window (= 2 * hop_size recommended)
+        stride: max-pool stride (= hop_size recommended)
+    Returns:
+        loss: scalar
+    """
+    import torch.nn.functional as F
+    padding = kernel_size // 2
+    n = y.size(-1)
+    upper_y    = F.max_pool1d(y,      kernel_size, stride=stride, padding=padding)
+    upper_yhat = F.max_pool1d(y_hat,  kernel_size, stride=stride, padding=padding)
+    lower_y    = F.max_pool1d(-y,     kernel_size, stride=stride, padding=padding)
+    lower_yhat = F.max_pool1d(-y_hat, kernel_size, stride=stride, padding=padding)
+    # trim to same length to guard against rounding differences
+    t = min(upper_y.size(-1), upper_yhat.size(-1))
+    return ((upper_y[..., :t] - upper_yhat[..., :t]).abs().mean() +
+            (lower_y[..., :t] - lower_yhat[..., :t]).abs().mean())
+
+
 def stft_loss(
     x: Tensor, y: Tensor, fft_lengths: Iterable[int], window_lengths: Iterable[int], hop_lengths: Iterable[int], 
     loss_scale_type: str) -> Tensor:
@@ -144,7 +169,7 @@ def reshape_zeros_like(x: Tensor, dim: int, length: int) -> Tensor:
     """Return torch.zeros_like(x), while change shape of the `dim` dimension."""
     shape = list(x.shape)
     shape[dim] = length
-    return torch.zeros(x.shape, dtype=x.dtype, device=x.device)
+    return torch.zeros(shape, dtype=x.dtype, device=x.device)
 
 @torch.jit.script
 def fftpad(x: Tensor, padding: int) -> Tensor:
@@ -180,7 +205,7 @@ def complex_cepstrum_to_fft(
     X_hat = torch.fft.fft(ccep, dim=-1)  # [fft_size@dim]
     log_magnitude_responses = X_hat.real
     phase_responses = X_hat.imag
-    magnitude_responses = log_magnitude_responses.exp()
+    magnitude_responses = log_magnitude_responses.clamp(max=10.0).exp()
     X_real = magnitude_responses * torch.cos(phase_responses)
     X_imag = magnitude_responses * torch.sin(phase_responses)
     X = torch.complex(X_real, X_imag)

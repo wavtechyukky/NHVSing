@@ -4,17 +4,17 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf), **tuned for singing voice synthesis**. It is implemented in PyTorch and supports JIT compilation. While following the structure proposed in the original paper, it includes modifications for application to singing voice synthesis.
+This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf), **tuned for singing voice synthesis**. It is implemented in PyTorch and supports JIT compilation and single-file ONNX export. While following the structure proposed in the original paper, it includes modifications for application to singing voice synthesis.
 
 ***
 
 ## Audio Samples
 
-**Ground Truth:**  
-[▶️ Listen](sample_wav/ground_truth.wav)
+**Ground Truth:**
+<audio controls src="sample_wav/ground_truth.wav"></audio>
 
-**Synthesized Voice:**  
-[▶️ Listen](sample_wav/inference_wav.wav)
+**Synthesized Voice:**
+<audio controls src="sample_wav/inference_wav.wav"></audio>
 
 ## Features
 
@@ -26,47 +26,44 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 The Real-Time Factor (RTF) and average inference time of this vocoder were measured under the following environment and conditions.
 
-- **Measurement Environment:** Google Colab (CPU runtime)
-- **CPU:** Intel(R) Xeon(R) CPU @ 2.20GHz (6 Cores / 12 Threads)
+- **Measurement Environment:** Apple M-series CPU (MacBook)
 - **Measurement Conditions:**
     - Input Audio Sampling Rate: 44.1kHz
-    - Input Audio Length: Approx. 6 seconds
+    - Input Audio Length: Approx. 26 seconds
     - Batch Size: 1
 
-| Model Type            | Device | Avg. Inference Time | RTF      |
-|-----------------------|--------|---------------------|----------|
-| Native Python         | CPU    | 0.437235 sec        | 0.067795 |
-| JIT Script            | CPU    | 0.419325 sec        | 0.065018 |
-| ONNX + PyTorch Hybrid | CPU    | 0.442845 sec        | 0.068665 |
-| Native Python         | CUDA   | 0.018330 sec        | 0.002842 |
-| JIT Script            | CUDA   | 0.018066 sec        | 0.002801 |
-| ONNX + PyTorch Hybrid | CUDA   | 0.439932 sec        | 0.068214 |
+| Model Type     | Device | Avg. Inference Time | RTF      |
+|----------------|--------|---------------------|----------|
+| Native Python  | CPU    | 1.923 sec           | 0.0740   |
+| JIT Script     | CPU    | 1.935 sec           | 0.0745   |
+| Unified ONNX   | CPU    | 4.586 sec           | 0.1765   |
 
 ### Differences from the Original Implementation
 The following points have been changed from the implementation in the original paper (some parameters can be edited in `config.yaml`):
 
 *   **Sampling Rate**: Supports **44.1kHz**.
-*   **Complex Cepstrum**: The number of dimensions has been expanded to **444**.
+*   **Complex Cepstrum**: The number of dimensions has been expanded to **512**.
 *   **Removal of FIR (postfilter)**: Although it contributes to reducing STFT loss, it was removed because it slows down processing and was judged not to contribute to learning the waveform, which is intuitively important.
-*   **Discriminator**: Uses the one from HiFi-GAN.
+*   **Discriminator**: Uses Multi-Scale Waveform Discriminator + Multi-Scale Complex STFT Discriminator. An adversarial loss warmup period is provided to prevent collapse of existing training, allowing fine-tuning from mid-training (`adversarial_warmup_epochs`).
+*   **Additional Loss Functions**:
+    *   **Envelope loss**: Extracts upper and lower envelopes via 1D max-pooling and computes MAE (RefineGAN §2.5.1). Suppresses jaggedness in the amplitude envelope (`envelope_scale`).
+    *   **Harmonic penalty loss**: L1 penalty for voiced components (`sig_harm`) being output in unvoiced regions (frames where F0=0). Suppresses breath-like sounds generated in unvoiced regions (`harmonic_penalty_scale`).
+*   **quef_norm**: Off by default (`use_quef_norm: false`). Experiments confirmed that enabling it inhibits learning of high-frequency bands.
 *   **Input Features**:
-    *   **log Mel Spectrogram**: Takes a log Mel spectrogram from **40Hz to 22050Hz** as input. While the paper cuts off high-frequency bands, it was determined that the reproducibility of high-frequency bands is necessary for improving intuitive quality. If high-frequency bands are not input as in the paper, frequency band control by FIR would be important.
+    *   **log Mel Spectrogram**: Takes a log Mel spectrogram from **40Hz to 22050Hz** as input. While the paper cuts off high-frequency bands, it was determined that the reproducibility of high-frequency bands is necessary for improving intuitive quality.
     *   **F0**: Takes an F0 with the **unvoiced sections linearly interpolated** as input, making the Unvoiced/Voiced flag unnecessary. In singing voice synthesis, it is not only important to be able to draw the F0 curve including unvoiced sections, but also, when changing behavior with a UV flag as in the paper, a smooth transition from unvoiced to voiced sections cannot be reproduced.
 
 ### Export Formats
 
-*   **PyTorch Native**: Same as the model used during training.
-*   **TorchScript**: Becomes executable from other languages through JIT compilation.
-*   **ONNX+PyTorch**: Implements the neural network part with ONNX and the DSP part with PyTorch. Used to verify if ONNX works correctly.
-*   **ONNX+NumPy (Prototype)**: Implements DSP with NumPy. While not noticeable in short audio, long audio breaks down and generation is slow.
-
-The reason for exporting in ONNX format is to enable execution in other languages and calculation libraries.
+*  **PyTorch Native** (`model.pth`): Same as the model used during training.
+*  **TorchScript** (`model_jit.pt`): Becomes executable from other languages through JIT compilation.
+*  **Unified ONNX** (`full_vocoder.onnx`): Exports the entire vocoder (NN + DSP) as a single ONNX file. Inference is possible with ONNXRuntime only.
 
 ***
 
 ## Environment
 
-*   Verified on Python 3.10.18
+*   Verified on Python 3.10
 
 ```bash
 pip install -r requirements.txt
@@ -79,60 +76,85 @@ pip install -r requirements.txt
 Extracts the features (in npz format) required for model training from WAV files.
 
 ```bash
+# Run WAV trimming → F0/mel extraction → train/test split all at once
 python preprocess.py --step all
 ```
 
-After preprocessing is complete, manually distribute the npz files generated in the `dataset/npz` directory into the `dataset/training/train` (for training) and `dataset/training/test` (for validation) folders.
+Each step can also be run individually.
+
+```bash
+python preprocess.py --step cut      # Silence trimming
+python preprocess.py --step create   # Create npz (F0 · mel spectrogram)
+python preprocess.py --step split    # Train/test split
+```
+
+The train/test ratio can be configured with `preprocess.train_test_split` in `config.yaml` (default: 100:1).
 
 ### 2. Training
 
-Starts model training. With the default `config.yaml`, the training progress and various logs are saved in `logs`, and model snapshots are saved in `snapshots`.
+Starts model training. TensorBoard logs are saved to `training.log_dir` and snapshots to `training.snapshot_dir` in `config.yaml`.
 
 ```bash
 python train.py
 ```
 
+Gradient accumulation and AMP (mixed precision) are supported. Configure with `gradient_accumulation_steps` and `use_amp` in `config.yaml`.
+
 ### 3. Exporting the Model
 
-Exports the trained model (snapshot) into formats that can be used for inference (`.pth`, `.pt`, `.onnx`).
+Exports the trained model (snapshot) into formats for inference.
 
 ```bash
-# Example: Exporting the snapshot from epoch 1000
-python export.py --checkpoint snapshots_normal/001000epoch.pth --config config.yaml
+# Export PyTorch native + JIT + Unified ONNX all at once
+python export.py \
+  --checkpoint snapshots/000990epoch.pth \
+  --config config.yaml \
+  --output_dir exported_models \
+  --pytorch \
+  --jit \
+  --full_onnx
 ```
+
+| Option         | Output File               | Description                        |
+|----------------|---------------------------|------------------------------------|
+| `--pytorch`    | `model.pth`               | state_dict (for retraining / fine-tuning) |
+| `--jit`        | `model_jit.pt`            | TorchScript (for other language integration) |
+| `--full_onnx`  | `full_vocoder.onnx`       | Single ONNX file                   |
 
 ### 4. Inference
 
-Generates audio from npz or WAV files using the exported model.
-
-**Using the PyTorch native model (.pth):**
+Generates audio from WAV or NPZ files using the exported model.
 
 ```bash
-python inference.py <input.wav_or_npz> --snapshot <path/to/model.pth>
-```
+# Inference with PyTorch model (also runs Native vs JIT speed comparison)
+python inference.py input.wav \
+  --snapshot exported_models/model.pth \
+  --config config.yaml \
+  --output_dir output
 
-**To check the operation of various exported models at once:**
-
-```bash
-python -m debug.inference_checker <path/to/wav> <path/to/output> --config config.yaml --pth_path exported_models/model.pth --pt_path exported_models/model_jit.pt --onnx_path exported_models/core_model.onnx
+# Also benchmark Unified ONNX at the same time
+python inference.py input.wav \
+  --snapshot exported_models/model.pth \
+  --config config.yaml \
+  --output_dir output \
+  --onnx exported_models/full_vocoder.onnx
 ```
 
 ***
 
 ## Known Issues
 
-*   **Training Process:** It does not currently support multi-GPU training or batch sizes greater than 2. (Training with a batch size of 1 also requires a large amount of memory).
-*   **ONNX Export:** Exporting the entire vocoder in ONNX format is not supported. The process gets stuck on `torch.fft` related code and the LTV Filter processing.
-*   **Low-Pitch Quality:** As far as tested with the described settings, there is a tendency for sound quality to degrade when synthesizing particularly low-pitched male vocals. In principle, it should be possible to reproduce male voices, so it is thought that the quality could be improved by changing hyperparameters or the frequency band of the input Mel spectrogram.
+*   **Training Process:** Multi-GPU training is not supported.
+*   **Other Frame Sizes:** Only the default frame size (hop_size=256) has been verified. Operation with other frame sizes is not guaranteed.
 *   **Speaker Dependency:** The generated waveform reflects the characteristics of the speaker it was trained on, making it difficult to reproduce the voices of multiple people. Instead, it can produce a realistic-sounding voice even from ambiguous acoustic features like those from FastSpeech2.
 
 ## License
 
-This project is licensed under the [MIT License](LICENCE).
+This project is licensed under the [MIT License](LICENSE).
 
 ## Acknowledgements
 
-This repository is largely based on the following papers and repositories published by Liu, et al.
+This repository is based on the following papers and repositories published by Liu, et al.
 
 *   Z. Liu, Y. Wang, K. Chen and Y. Jia, "Neural Homomorphic Vocoder," *Proc. Interspeech 2020*, pp. 3500-3504, doi: 10.21437/Interspeech.2020-2325.
 *   [https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)
