@@ -1,6 +1,4 @@
-import os
 import sys
-from contextlib import contextmanager, redirect_stdout, redirect_stderr
 import argparse
 import yaml
 from pathlib import Path
@@ -12,25 +10,16 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-import torch
 import numpy as np
 import soundfile as sf
-import pyworld as pw
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
 from scipy.signal import resample_poly
 import librosa
 
-from dsp import frame_center_log_mel_spectrogram
+import pyworld as pw
+
+from tools.cut_by_phrases import detect_regions, build_segments
 
 # --- Utility Functions ---
-
-@contextmanager
-def suppress_stdout_stderr():
-    """Temporarily suppress stdout and stderr, e.g., from C/C++ libraries."""
-    with open(os.devnull, 'w') as fnull:
-        with redirect_stdout(fnull), redirect_stderr(fnull):
-            yield
 
 def load_config(path: str) -> dict:
     """Load a YAML configuration file."""
@@ -70,8 +59,8 @@ def step_resample_wavs(input_dir: Path, output_dir: Path, sample_rate: int, pref
         sf.write(out_path, wav, sample_rate)
 
 def step_cut_wavs(input_dir: Path, output_dir: Path, cfg: dict):
-    """Split WAV files by silent sections."""
-    print(f"\n--- Step 2: Cutting WAVs at silent sections ---")
+    """Split WAV files into phrase-based segments using the cut_by_phrases algorithm."""
+    print(f"\n--- Step 2: Cutting WAVs by phrases ---")
     print(f"Input dir: {input_dir}")
     print(f"Output dir: {output_dir}")
 
@@ -82,43 +71,56 @@ def step_cut_wavs(input_dir: Path, output_dir: Path, cfg: dict):
         print("Warning: No WAV files found in the input directory.")
         return
 
-    max_chunk_len_ms = 0 # Variable to record the maximum length (in milliseconds)
+    cut_cfg = cfg.get('cut_wavs', {})
+    silence_thresh_db = cut_cfg.get('silence_thresh', -50.0)
+    min_silence_dur   = cut_cfg.get('min_silence_dur', 0.10)
+    max_dur           = cut_cfg.get('max_dur', 9.0)
+    long_silence      = cut_cfg.get('long_silence', 1.0)
+    pad               = cut_cfg.get('pad', 0.10)
+
+    print(f"  silence_thresh={silence_thresh_db} dBFS, min_silence_dur={min_silence_dur}s, "
+          f"max_dur={max_dur}s, long_silence={long_silence}s, pad={pad}s")
+
+    max_seg_len_s = 0.0
 
     for wav_path in tqdm(wav_paths, desc="Cutting"):
-        # Load with pydub
-        sound = AudioSegment.from_file(wav_path)
-        
-        # Split on silence
-        chunks = split_on_silence(
-            sound,
-            min_silence_len=cfg['min_silence_len'],
-            silence_thresh=cfg['silence_thresh'],
-            keep_silence=cfg['keep_silence']
-        )
-        
-        # Save the split files
-        for i, chunk in enumerate(chunks):
-            # Update the max chunk length
-            if len(chunk) > max_chunk_len_ms:
-                max_chunk_len_ms = len(chunk)
+        audio, sr = sf.read(str(wav_path), always_2d=False)
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
 
-            save_path = output_dir / f"{wav_path.stem}_{i:03d}.wav"
-            chunk.export(save_path, format='wav')
+        regions = detect_regions(audio, sr,
+                                 silence_thresh_db=silence_thresh_db,
+                                 min_silence_dur=min_silence_dur)
 
-    # Convert max length to seconds and print
-    if max_chunk_len_ms > 0:
-        max_chunk_len_s = max_chunk_len_ms / 1000
-        print(f"Max length of cut audio: {max_chunk_len_s:.2f} seconds")
+        segments = build_segments(regions, sr,
+                                  max_dur=max_dur,
+                                  long_silence=long_silence,
+                                  pad=pad,
+                                  total_samples=len(audio))
 
-def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict, spec_type='nhv'):
+        for idx, (s, e) in enumerate(segments):
+            chunk = audio[s:e]
+            dur = (e - s) / sr
+            if dur > max_seg_len_s:
+                max_seg_len_s = dur
+            save_path = output_dir / f"{wav_path.stem}_{idx:04d}.wav"
+            sf.write(str(save_path), chunk, sr)
+
+    if max_seg_len_s > 0:
+        print(f"Max length of cut audio: {max_seg_len_s:.2f} seconds")
+
+def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict):
     """Extract features from WAV files and save them in NPZ format."""
     print(f"\n--- Step 3: Creating NPZ files ---")
     print(f"Input dir: {input_dir}")
     print(f"Output dir: {output_dir}")
 
+    print(f"min={cfg['f0_min']}, fmax={cfg['f0_max']}")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     wav_paths = sorted(list(input_dir.glob("*.wav")))
-    
+
     if not wav_paths:
         print("Warning: No WAV files found in the input directory.")
         return
@@ -128,102 +130,53 @@ def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict, spec_type='nhv
         save_path = output_dir / f"{wav_path.stem}.npz"
         if save_path.exists():
             continue
-        
+
         y, sr = sf.read(wav_path)
         y = y * cfg['scale']
         assert sr == cfg['sample_rate']
-        
+
         frame_size = cfg['frame_size']
         y = y[:frame_size * (len(y) // frame_size)]
 
-        # Flag to determine whether to align F0 frames with mel-spectrogram center frames
-        should_align_f0 = cfg.get('align_f0_to_spec', True)
-        y_for_f0 = y
+        # F0 estimation (pyworld harvest)
+        # librosa center=True and pyworld both center frame k at k*hop_size, so no shift needed.
+        frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
+        f0_raw, _ = pw.harvest(
+            y.astype(np.float64), sr,
+            f0_floor=cfg['f0_min'],
+            f0_ceil=cfg['f0_max'],
+            frame_period=frame_period,
+        )
 
-        if should_align_f0:
-            # To align F0 with the center of the mel-spectrogram frames,
-            # shift the audio to the left by frame_size / 2 (i.e., cut the beginning)
-            # and pad the end to maintain length.
-            # This makes the 0th frame of harvest analyze the center of the original audio's frame_size position.
-            shift_amount = frame_size // 2
-            y_for_f0 = np.pad(y[shift_amount:], (0, shift_amount), 'constant')
-
-        with suppress_stdout_stderr():
-            # F0 estimation (Harvest)
-            # To match the hop_size of F0 and mel-spectrogram, calculate frame_period based on hop_size
-            f0_harvest, _ = pw.harvest(
-                y_for_f0.astype(np.float64), sr, # Use the padded waveform
-                f0_floor=cfg['f0_min'], f0_ceil=cfg['f0_max'], 
-                frame_period=cfg['hop_size'] / sr * 1000
-            )
-
-        # Branch for mel-spectrogram calculation based on flag
-        if spec_type == 'nhv':
-            # log mel-spectrogram calculation
-            wav_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(0)
-            log_melspc = frame_center_log_mel_spectrogram(
-                wav_tensor, frame_size, frame_size * 4, 'hann',
-                cfg['fft_size'], cfg['sample_rate'], cfg['mel_dim'], 
-                cfg['mel_min'], cfg['mel_max'], cfg['min_level_db']
-            ).squeeze(0)
-            # Normalization process
-            # Commented out because training somehow didn't go well
-            #log_melspc = torch.clip((log_melspc - cfg['min_level_db']) / -cfg['min_level_db'], 0, 1)
-        else:
-            raise ValueError(f"Unknown spec_type: {spec_type}")
-
-
-        '''
-        elif spec_type == 'power':
-            # Log power mel-spectrogram using librosa
-            # Default minimum value is -80 (dB)
-            # Training is possible with this in train.py, but other scripts
-            # do not support this mel-spectrogram, so it's commented out.
-            S = librosa.feature.melspectrogram(
-                y=y,
-                sr=cfg['sample_rate'],
-                n_fft=cfg['fft_size'],
-                hop_length=cfg['hop_size'],
-                win_length=cfg['hop_size'] * 4, # Equivalent to NHV's window_size
-                n_mels=cfg['mel_dim'],
-                fmin=cfg['mel_min'],
-                fmax=cfg['mel_max']
-            )
-            # Convert to dB scale with power_to_db
-            log_melspc_np = librosa.power_to_db(S, ref=np.max)
-            # Transpose to (Frames, Mels) shape and convert to Tensor
-            log_melspc = torch.from_numpy(log_melspc_np.T).float()
-        '''
+        # Log mel-spectrogram (librosa power_to_db, shape: (T, D))
+        S = librosa.feature.melspectrogram(
+            y=y,
+            sr=cfg['sample_rate'],
+            n_fft=cfg['fft_size'],
+            hop_length=cfg['hop_size'],
+            win_length=cfg['hop_size'] * 4,
+            n_mels=cfg['mel_dim'],
+            fmin=cfg['mel_min'],
+            fmax=cfg['mel_max'],
+            center=True,
+        )
+        log_melspc = librosa.power_to_db(S, ref=1.0).T  # (T, D)  — 絶対スケール保持
 
         # Align the lengths of F0, mel-spectrogram, and waveform
         hop_size = cfg['hop_size']
 
-        # 1. Get the minimum number of frames
-        n_frames = min(len(f0_harvest), len(log_melspc))
+        n_frames = min(len(f0_raw), len(log_melspc))
+        final_n_frames = min(n_frames * hop_size, len(y)) // hop_size
 
-        # 2. Calculate the corresponding number of audio samples for this frame count and compare with actual audio length
-        expected_wav_len = n_frames * hop_size
-        final_wav_len = min(expected_wav_len, len(y))
-
-        # 3. Recalculate the number of frames from the final audio length to determine the final frame count
-        final_n_frames = final_wav_len // hop_size
-
-        # 4. Trim everything to the final length
-        f0_trimmed = f0_harvest[:final_n_frames]
+        f0_trimmed = f0_raw[:final_n_frames]
         log_melspc_trimmed = log_melspc[:final_n_frames]
         wav_trimmed = y[:final_n_frames * hop_size]
-
-        # Convert Tensor to Numpy array
-        if isinstance(log_melspc_trimmed, torch.Tensor):
-            log_melspc_np = log_melspc_trimmed.numpy()
-        else:
-            log_melspc_np = log_melspc_trimmed
 
         # Save to NPZ file
         np.savez(
             save_path,
             f0=f0_trimmed,
-            log_melspc=log_melspc_np,
+            log_melspc=log_melspc_trimmed,
             wav=wav_trimmed
         )
 
@@ -350,67 +303,51 @@ def step_filter_npz(npz_dir: Path, f0_img_dir: Path, cfg: dict):
 
     print(f"Filtering complete. {moved_count} files moved to backup destination.")
 
-'''
-def plot_compare_mel_spectrogram(wav_path: Path, cfg: dict, save_path: Path = None):
+
+def step_split_train_test(npz_dir: Path, train_dir: Path, test_dir: Path, cfg: dict):
+    """Copy NPZ files from npz_dir into train/test directories based on the configured ratio.
+
+    Files are sorted for reproducibility, then distributed so that every
+    (train + test)-th file starting at index `train` goes to test.
+    Example with train=100, test=1: indices 100, 201, 302, ... → test.
     """
-    Extracts two types of mel-spectrograms (NHV and power) from a single WAV file and creates a comparison plot.
-    """
-    y, sr = sf.read(wav_path)
-    y = y * cfg['scale']
-    assert sr == cfg['sample_rate']
-    frame_size = cfg['frame_size']
-    y = y[:frame_size * (len(y) // frame_size)]
+    print(f"\n--- Step 6: Splitting NPZ into train/test ---")
 
-    # NHV method
-    wav_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(0)
-    log_melspc_nhv = frame_center_log_mel_spectrogram(
-        wav_tensor, frame_size, frame_size * 4, 'hann',
-        cfg['fft_size'], cfg['sample_rate'], cfg['mel_dim'], 
-        cfg['mel_min'], cfg['mel_max'], -10.0
-    ).squeeze(0).numpy()
+    split_cfg = cfg.get('train_test_split', {})
+    train_ratio = split_cfg.get('train', 100)
+    test_ratio  = split_cfg.get('test', 1)
+    total_ratio = train_ratio + test_ratio
 
-    # Log power mel-spectrogram
-    S = librosa.feature.melspectrogram(
-        y=y,
-        sr=cfg['sample_rate'],
-        n_fft=cfg['fft_size'],
-        hop_length=cfg['hop_size'],
-        win_length=cfg['hop_size'] * 4,
-        n_mels=cfg['mel_dim'],
-        fmin=cfg['mel_min'],
-        fmax=cfg['mel_max']
-    )
-    log_melspc_power = librosa.power_to_db(S, ref=np.max).T
+    print(f"Input source: {npz_dir}")
+    print(f"Train dir:    {train_dir}  (ratio: {train_ratio})")
+    print(f"Test dir:     {test_dir}  (ratio: {test_ratio})")
 
-    # Align lengths
-    min_len = min(log_melspc_nhv.shape[0], log_melspc_power.shape[0])
-    log_melspc_nhv = log_melspc_nhv[:min_len]
-    log_melspc_power = log_melspc_power[:min_len]
+    npz_paths = sorted(list(npz_dir.glob("*.npz")))
+    if not npz_paths:
+        print("Warning: No NPZ files found in the input directory.")
+        return
 
-    # Plot
-    fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-    axes[0].imshow(log_melspc_nhv.T, origin='lower', aspect='auto', cmap='magma')
-    axes[0].set_title('NHV log-mel spectrogram')
-    axes[0].set_ylabel('Mel Bin')
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
 
-    axes[1].imshow(log_melspc_power.T, origin='lower', aspect='auto', cmap='magma')
-    axes[1].set_title('FS2 log-mel spectrogram')
-    axes[1].set_xlabel('Frame')
-    axes[1].set_ylabel('Mel Bin')
+    n_train = n_test = 0
+    for i, npz_path in enumerate(npz_paths):
+        if i % total_ratio >= train_ratio:
+            dst = test_dir / npz_path.name
+            n_test += 1
+        else:
+            dst = train_dir / npz_path.name
+            n_train += 1
+        shutil.copy2(str(npz_path), str(dst))
 
-    plt.tight_layout()
-    if save_path:
-        fig.savefig(save_path, bbox_inches='tight')
-        plt.close(fig)
-    else:
-        plt.show()
-'''
+    print(f"Split complete: train={n_train}, test={n_test}  (total={len(npz_paths)})")
+
 
 # --- Main Processing ---
 def main():
     parser = argparse.ArgumentParser(description="Audio dataset preprocessing script", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration file")
-    parser.add_argument("--step", type=str, default="all", choices=["all", "resample", "cut", "npz", "plot", "filter"], help="Select the processing step to execute")
+    parser.add_argument("--step", type=str, default="all", choices=["all", "resample", "cut", "npz", "plot", "filter", "split"], help="Select the processing step to execute")
     args = parser.parse_args()
 
     try:
@@ -425,22 +362,27 @@ def main():
     cut_wav_dir = Path(p_cfg['cut_wav_dir'])
     npz_dir = Path(p_cfg['npz_dir'])
     f0_img_dir = Path(p_cfg['f0_img_dir'])
-    
+    train_dir = Path(cfg['training']['train_dir'])
+    test_dir  = Path(cfg['training']['test_dir'])
+
     if args.step in ["all", "resample"]:
         step_resample_wavs(raw_wav_dir, resample_wav_dir, p_cfg['sample_rate'], p_cfg['prefix'])
-    
+
     if args.step in ["all", "cut"]:
         step_cut_wavs(resample_wav_dir, cut_wav_dir, p_cfg)
 
     if args.step in ["all", "npz"]:
         step_create_npz(cut_wav_dir, npz_dir, p_cfg)
-    
+
     if args.step in ["all", "plot"]:
         step_plot_f0_validation(npz_dir, f0_img_dir, p_cfg)
 
     if args.step in ["all", "filter"]:
         step_filter_npz(npz_dir, f0_img_dir, p_cfg)
-    
+
+    if args.step in ["all", "split"]:
+        step_split_train_test(npz_dir, train_dir, test_dir, p_cfg)
+
     print("All processing steps completed.")
 
 if __name__ == "__main__":

@@ -28,7 +28,8 @@ class NHVSing(nn.Module):
         # Store necessary parameters
         self.fs = vocoder_cfg['sample_rate']
         self.hop_size = vocoder_cfg['hop_size']
-        self.fft_size = ltv_filter_cfg['fft_size']
+        self.fft_size_harm = ltv_filter_cfg['fft_size']
+        self.fft_size_noise = ltv_filter_cfg.get('fft_size_noise', self.fft_size_harm)
         self.noise_std = vocoder_cfg['noise_std']
         
         # This is the ONNX-exportable part
@@ -49,40 +50,60 @@ class NHVSing(nn.Module):
         # DSP functions (not part of the ONNX graph)
         self.impulse_generator = generate_impulse_train
 
-    def forward(self, x, cf0):
-        """
+    def _forward_impl(self, x: torch.Tensor, cf0: torch.Tensor,
+                      no_dsp_grad: bool, noise_std: float):
+        """Common forward logic. Returns (y, sig_harm)."""
+        actual_std = self.noise_std if noise_std < 0 else noise_std
+        z_shape = (x.size(0), 1, x.size(1) * self.hop_size)
+        if actual_std > 0:
+            z = torch.normal(0.0, actual_std, z_shape).to(x.device)
+        else:
+            z = torch.zeros(z_shape, device=x.device)
+
+        ccep_harm, ccep_noise = self.convs_onnx(x)
+
+        if no_dsp_grad:
+            ccep_harm = ccep_harm.detach()
+            ccep_noise = ccep_noise.detach()
+
+        cf0_resampled = repeat_interpolate(cf0, self.hop_size)
+        harmonic_source = self.impulse_generator(cf0_resampled, 200, float(self.fs))
+        harmonic_source = harmonic_source * (cf0_resampled > 0).float()
+
+        imp_harm = complex_cepstrum_to_imp(ccep_harm, self.fft_size_harm)
+        sig_harm = ltv_fir(harmonic_source, imp_harm, self.hop_size)
+
+        imp_noise = complex_cepstrum_to_imp(ccep_noise, self.fft_size_noise)
+        sig_noise = ltv_fir(z, imp_noise, self.hop_size)
+
+        y = torch.clamp(sig_harm + sig_noise, -1, 1)
+        return y.reshape(x.size(0), -1), sig_harm
+
+    def forward(self, x: torch.Tensor, cf0: torch.Tensor,
+                no_dsp_grad: bool = False, noise_std: float = -1.0) -> torch.Tensor:
+        """Inference-compatible forward. JIT-scriptable.
+
         Args:
-            x: (B, T, D) - Mel Spectrogram
+            x:   (B, T, D) - Log mel-spectrogram
             cf0: (B, 1, T) - Continuous F0
-        
+            no_dsp_grad: If True, detach DSP outputs from graph (saves memory).
+            noise_std: Override noise std. -1.0 → use self.noise_std.
         Returns:
             y: (B, T * hop_size) - Synthesized waveform
         """
-        # Generate noise internally
-        z_shape = (x.size(0), 1, x.size(1) * self.hop_size)
-        z = torch.normal(0.0, self.noise_std, z_shape).to(x.device)
+        y, _ = self._forward_impl(x, cf0, no_dsp_grad, noise_std)
+        return y
 
-        # --- Part 1: ONNX-able convolutions ---
-        ccep_harm, ccep_noise = self.convs_onnx(x)
+    def forward_train(self, x: torch.Tensor, cf0: torch.Tensor,
+                      no_dsp_grad: bool = False,
+                      noise_std: float = -1.0):
+        """Training forward. Returns (y, sig_harm) for harmonic penalty loss.
 
-        # --- Part 2: Non-exportable DSP processing ---
-        # Generate harmonic source signal
-        cf0_resampled = repeat_interpolate(cf0, self.hop_size)
-        harmonic_source = self.impulse_generator(cf0_resampled, 200, float(self.fs))
-
-        # Process harmonic part
-        imp_harm = complex_cepstrum_to_imp(ccep_harm, self.fft_size)
-        sig_harm = ltv_fir(harmonic_source, imp_harm, self.hop_size)
-
-        # Process noise part
-        imp_noise = complex_cepstrum_to_imp(ccep_noise, self.fft_size)
-        sig_noise = ltv_fir(z, imp_noise, self.hop_size)
-        
-        # Combine and clamp
-        y = sig_harm + sig_noise
-        y = torch.clamp(y, -1, 1)
-        
-        return y.reshape(x.size(0), -1)
+        Returns:
+            y:        (B, T * hop_size) - Synthesized waveform
+            sig_harm: (B, 1, T * hop_size) - Harmonic component (for penalty)
+        """
+        return self._forward_impl(x, cf0, no_dsp_grad, noise_std)
 
     def remove_weight_norm(self):
         """Removes weight normalization from the convolutional layers."""

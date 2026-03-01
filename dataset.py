@@ -12,8 +12,9 @@ class VocoderDataset(Dataset):
     Args:
         dataset_dir (str or Path): Root directory containing the .npz files.
     """
-    def __init__(self, dataset_dir: str):
+    def __init__(self, dataset_dir: str, hop_size: int):
         self.dataset_path = Path(dataset_dir)
+        self.hop_size = hop_size
         # .rglob("*.npz") を使ってサブディレクトリ内も再帰的に検索
         self.file_paths = sorted(list(self.dataset_path.rglob("*.npz")))
         
@@ -34,9 +35,8 @@ class VocoderDataset(Dataset):
         wav = npz['wav']
 
         # フレーム数 × hop_size に長さを厳密に合わせる
-        hop_size = 256
         n_frames = log_melspc.shape[0]
-        expected_wav_len = n_frames * hop_size
+        expected_wav_len = n_frames * self.hop_size
         
         # wavが長い場合は切り捨て、短い場合はゼロパディング
         if len(wav) > expected_wav_len:

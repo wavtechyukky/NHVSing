@@ -9,20 +9,35 @@ class NHVConvsONNX(nn.Module):
     """
     def __init__(self, ltv_params: dict):
         super().__init__()
-        # quef_norm is needed for scaling the output of conv
-        ccep_size = ltv_params["ccep_size"]
-        idx = torch.arange(1, ccep_size // 2 + 1).float()
-        quef_norm = torch.cat([torch.flip(idx, dims=[-1]), idx], dim=-1)
-        self.register_buffer("quef_norm", quef_norm)
+        # Harmonic and noise branches can have different ccep sizes.
+        # Noise only needs a smooth spectral envelope, so a smaller ccep_size suffices.
+        ccep_size_harm = ltv_params["ccep_size"]
+        ccep_size_noise = ltv_params.get("ccep_size_noise", ltv_params["ccep_size"])
 
-        # Create two convolution modules, one for harmonic and one for noise
-        # These parameters should be passed from the main config
-        n_ltv_layers = ltv_params.get("n_ltv_layers", 10) # Default from a config if not present
+        # Scale by 1/|n| as specified in Liu et al. (Interspeech 2020):
+        # "outputs need to be scaled by 1/|n|, as natural complex cepstrums decay at least as fast as 1/|n|"
+        # quef_norm[k] = |n(k)|, shape: [1, 1, 2, ..., N//2-1, N//2, N//2-1, ..., 1]
+        # Set use_quef_norm: false in ltv_filter config to disable (all ones = no scaling).
+        use_quef_norm = ltv_params.get("use_quef_norm", True)
+        if use_quef_norm:
+            pos_harm = torch.arange(1, ccep_size_harm // 2).float()
+            neg_harm = torch.arange(ccep_size_harm // 2, 0, -1).float()
+            quef_norm_harm = torch.cat([torch.ones(1), pos_harm, neg_harm])
+            pos_noise = torch.arange(1, ccep_size_noise // 2).float()
+            neg_noise = torch.arange(ccep_size_noise // 2, 0, -1).float()
+            quef_norm_noise = torch.cat([torch.ones(1), pos_noise, neg_noise])
+        else:
+            quef_norm_harm = torch.ones(ccep_size_harm)
+            quef_norm_noise = torch.ones(ccep_size_noise)
+        self.register_buffer("quef_norm_harm", quef_norm_harm)
+        self.register_buffer("quef_norm_noise", quef_norm_noise)
+
+        n_ltv_layers = ltv_params.get("n_ltv_layers", 10)
 
         self.conv_harmonic = ConvLayers(
             in_channels=ltv_params["in_channels"],
             conv_channels=ltv_params["conv_channels"],
-            out_channels=ltv_params["ccep_size"],
+            out_channels=ccep_size_harm,
             kernel_size=ltv_params["kernel_size"],
             dilation_size=ltv_params["dilation_size"],
             group_size=ltv_params["group_size"],
@@ -33,7 +48,7 @@ class NHVConvsONNX(nn.Module):
         self.conv_noise = ConvLayers(
             in_channels=ltv_params["in_channels"],
             conv_channels=ltv_params["conv_channels"],
-            out_channels=ltv_params["ccep_size"],
+            out_channels=ccep_size_noise,
             kernel_size=ltv_params["kernel_size"],
             dilation_size=ltv_params["dilation_size"],
             group_size=ltv_params["group_size"],
@@ -46,19 +61,19 @@ class NHVConvsONNX(nn.Module):
         """
         Args:
             x (Tensor): Input mel-cepstrum tensor (B, T, D)
-        
+
         Returns:
             ccep_harm (Tensor): Harmonic complex cepstrum (B, T, ccep_size)
-            ccep_noise (Tensor): Noise complex cepstrum (B, T, ccep_size)
+            ccep_noise (Tensor): Noise complex cepstrum (B, T, ccep_size_noise)
         """
-        ccep_harm = self.conv_harmonic(x) / self.quef_norm
-        ccep_noise = self.conv_noise(x) / self.quef_norm
+        ccep_harm = self.conv_harmonic(x) / self.quef_norm_harm
+        ccep_noise = self.conv_noise(x) / self.quef_norm_noise
         return ccep_harm, ccep_noise
 
     def load_weights(self, original_model):
         """
         Copies weights from the original NHVSing model.
-        
+
         Args:
             original_model (NHVSing): The trained NHVSing model.
         """

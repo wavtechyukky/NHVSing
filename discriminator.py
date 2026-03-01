@@ -22,32 +22,139 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 '''
 
+import logging
+
+import numpy as np
 import torch
 import torch.nn as nn
-import logging
-import numpy as np
+import torchaudio
 
-from distutils.version import LooseVersion
-is_pytorch_17plus = LooseVersion(torch.__version__) >= LooseVersion("1.7")
 
-class Discriminator(nn.Module):
-    """A discriminator module that combines MelGANMultiScaleDiscriminator and MultiResolutionSTFTDiscriminator.
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
 
-    This module processes the input audio through both a multi-scale discriminator (MelGAN style)
-    and a multi-resolution STFT-based discriminator. The final output is the sum of the outputs
-    from both discriminators, providing a comprehensive analysis of the audio's authenticity.
-    """
-    def __init__(self):
-        super(Discriminator, self).__init__()
-        self.msd = MelGANMultiScaleDiscriminator()
-        self.mfd = MultiResolutionSTFTDiscriminator()
+def _get_2d_padding(kernel_size, dilation=(1, 1)):
+    """'same' padding (same spatial size before striding) for Conv2d."""
+    return (
+        ((kernel_size[0] - 1) * dilation[0]) // 2,
+        ((kernel_size[1] - 1) * dilation[1]) // 2,
+    )
+
+
+def _norm_conv2d(in_ch, out_ch, **kwargs):
+    """Conv2d + weight normalization."""
+    return nn.utils.weight_norm(nn.Conv2d(in_ch, out_ch, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# MelGAN Multi-Scale Discriminator
+# ---------------------------------------------------------------------------
+
+class MelGANDiscriminator(torch.nn.Module):
+    """MelGAN discriminator module."""
+
+    def __init__(self,
+                 in_channels=1,
+                 out_channels=1,
+                 kernel_sizes=[5, 3],
+                 channels=16,
+                 max_downsample_channels=1024,
+                 bias=True,
+                 downsample_scales=[4, 4, 4, 4],
+                 nonlinear_activation="LeakyReLU",
+                 nonlinear_activation_params={"negative_slope": 0.2},
+                 pad="ReflectionPad1d",
+                 pad_params={},
+                 ):
+        """Initilize MelGAN discriminator module.
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            kernel_sizes (list): List of two kernel sizes. The prod will be used for the first conv layer,
+                and the first and the second kernel sizes will be used for the last two layers.
+                For example if kernel_sizes = [5, 3], the first layer kernel size will be 5 * 3 = 15,
+                the last two layers' kernel size will be 5 and 3, respectively.
+            channels (int): Initial number of channels for conv layer.
+            max_downsample_channels (int): Maximum number of channels for downsampling layers.
+            bias (bool): Whether to add bias parameter in convolution layers.
+            downsample_scales (list): List of downsampling scales.
+            nonlinear_activation (str): Activation function module name.
+            nonlinear_activation_params (dict): Hyperparameters for activation function.
+            pad (str): Padding function module name before dilated convolution layer.
+            pad_params (dict): Hyperparameters for padding function.
+        """
+        super(MelGANDiscriminator, self).__init__()
+        self.layers = torch.nn.ModuleList()
+
+        # check kernel size is valid
+        assert len(kernel_sizes) == 2
+        assert kernel_sizes[0] % 2 == 1
+        assert kernel_sizes[1] % 2 == 1
+
+        # add first layer
+        self.layers += [
+            torch.nn.Sequential(
+                getattr(torch.nn, pad)((np.prod(kernel_sizes) - 1) // 2, **pad_params),
+                torch.nn.Conv1d(in_channels, channels, np.prod(kernel_sizes), bias=bias),
+                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+            )
+        ]
+
+        # add downsample layers
+        in_chs = channels
+        for downsample_scale in downsample_scales:
+            out_chs = min(in_chs * downsample_scale, max_downsample_channels)
+            self.layers += [
+                torch.nn.Sequential(
+                    torch.nn.Conv1d(
+                        in_chs, out_chs,
+                        kernel_size=downsample_scale * 10 + 1,
+                        stride=downsample_scale,
+                        padding=downsample_scale * 5,
+                        groups=in_chs // 4,
+                        bias=bias,
+                    ),
+                    getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+                )
+            ]
+            in_chs = out_chs
+
+        # add final layers
+        out_chs = min(in_chs * 2, max_downsample_channels)
+        self.layers += [
+            torch.nn.Sequential(
+                torch.nn.Conv1d(
+                    in_chs, out_chs, kernel_sizes[0],
+                    padding=(kernel_sizes[0] - 1) // 2,
+                    bias=bias,
+                ),
+                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+            )
+        ]
+        self.layers += [
+            torch.nn.Conv1d(
+                out_chs, out_channels, kernel_sizes[1],
+                padding=(kernel_sizes[1] - 1) // 2,
+                bias=bias,
+            ),
+        ]
 
     def forward(self, x):
-        # outs_1 = self.mpd(x)
-        outs_1 = self.msd(x)
-        outs_2 = self.mfd(x)
-        return outs_1 + outs_2
-    
+        """Calculate forward propagation.
+        Args:
+            x (Tensor): Input noise signal (B, 1, T).
+        Returns:
+            List: List of output tensors of each layer.
+        """
+        outs = []
+        for f in self.layers:
+            x = f(x)
+            outs += [x]
+
+        return outs
+
+
 class MelGANMultiScaleDiscriminator(torch.nn.Module):
     """MelGAN multi-scale discriminator module."""
 
@@ -167,295 +274,181 @@ class MelGANMultiScaleDiscriminator(torch.nn.Module):
 
         self.apply(_reset_parameters)
 
-class MelGANDiscriminator(torch.nn.Module):
-    """MelGAN discriminator module."""
 
-    def __init__(self,
-                 in_channels=1,
-                 out_channels=1,
-                 kernel_sizes=[5, 3],
-                 channels=16,
-                 max_downsample_channels=512,
-                 bias=True,
-                 downsample_scales=[4, 4, 4, 4],
-                 nonlinear_activation="LeakyReLU",
-                 nonlinear_activation_params={"negative_slope": 0.2},
-                 pad="ReflectionPad1d",
-                 pad_params={},
-                 ):
-        """Initilize MelGAN discriminator module.
-        Args:
-            in_channels (int): Number of input channels.
-            out_channels (int): Number of output channels.
-            kernel_sizes (list): List of two kernel sizes. The prod will be used for the first conv layer,
-                and the first and the second kernel sizes will be used for the last two layers.
-                For example if kernel_sizes = [5, 3], the first layer kernel size will be 5 * 3 = 15,
-                the last two layers' kernel size will be 5 and 3, respectively.
-            channels (int): Initial number of channels for conv layer.
-            max_downsample_channels (int): Maximum number of channels for downsampling layers.
-            bias (bool): Whether to add bias parameter in convolution layers.
-            downsample_scales (list): List of downsampling scales.
-            nonlinear_activation (str): Activation function module name.
-            nonlinear_activation_params (dict): Hyperparameters for activation function.
-            pad (str): Padding function module name before dilated convolution layer.
-            pad_params (dict): Hyperparameters for padding function.
-        """
-        super(MelGANDiscriminator, self).__init__()
-        self.layers = torch.nn.ModuleList()
+# ---------------------------------------------------------------------------
+# Complex STFT Discriminator
+# Reference: EnCodec (Défossez et al., 2022) Multi-Scale STFT Discriminator
+#   https://github.com/facebookresearch/encodec
+# ---------------------------------------------------------------------------
 
-        # check kernel size is valid
-        assert len(kernel_sizes) == 2
-        assert kernel_sizes[0] % 2 == 1
-        assert kernel_sizes[1] % 2 == 1
+class ComplexSTFTSubDiscriminator(nn.Module):
+    """Single-scale complex STFT sub-discriminator.
 
-        # add first layer
-        self.layers += [
-            torch.nn.Sequential(
-                getattr(torch.nn, pad)((np.prod(kernel_sizes) - 1) // 2, **pad_params),
-                torch.nn.Conv1d(in_channels, channels, np.prod(kernel_sizes), bias=bias),
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-            )
-        ]
+    Takes waveform [B, 1, T], computes complex STFT, stacks real and imaginary
+    parts as 2 input channels, and processes through 2D convolution layers.
 
-        # add downsample layers
-        in_chs = channels
-        for downsample_scale in downsample_scales:
-            out_chs = min(in_chs * downsample_scale, max_downsample_channels)
-            self.layers += [
-                torch.nn.Sequential(
-                    torch.nn.Conv1d(
-                        in_chs, out_chs,
-                        kernel_size=downsample_scale * 10 + 1,
-                        stride=downsample_scale,
-                        padding=downsample_scale * 5,
-                        groups=in_chs // 4,
-                        bias=bias,
-                    ),
-                    getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-                )
-            ]
-            in_chs = out_chs
+    Returns List[Tensor] (intermediate feature maps + final score).
+    The last element [-1] is the discriminator score; earlier elements are
+    used for feature matching loss.
 
-        # add final layers
-        out_chs = min(in_chs * 2, max_downsample_channels)
-        self.layers += [
-            torch.nn.Sequential(
-                torch.nn.Conv1d(
-                    in_chs, out_chs, kernel_sizes[0],
-                    padding=(kernel_sizes[0] - 1) // 2,
-                    bias=bias,
-                ),
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-            )
-        ]
-        self.layers += [
-            torch.nn.Conv1d(
-                out_chs, out_channels, kernel_sizes[1],
-                padding=(kernel_sizes[1] - 1) // 2,
-                bias=bias,
-            ),
-        ]
+    Architecture:
+      - spec_transform: torchaudio.Spectrogram (power=None → complex output)
+      - conv_in: (2 → filters) kernel=(3,9), same-pad
+      - 3 × dilation conv: (filters → filters) kernel=(3,9), stride=(1,2) in freq,
+                            dilation=(1/2/4 in time, 1 in freq)
+      - conv_square: (filters → filters) kernel=(3,3), same-pad
+      - conv_post: (filters → 1) kernel=(3,3), same-pad  ← final score
 
-    def forward(self, x):
-        """Calculate forward propagation.
-        Args:
-            x (Tensor): Input noise signal (B, 1, T).
-        Returns:
-            List: List of output tensors of each layer.
-        """
-        outs = []
-        for f in self.layers:
-            x = f(x)
-            outs += [x]
-
-        return outs
-    
-
-class MultiResolutionSTFTDiscriminator(torch.nn.Module):
-    def __init__(
-        self,
-        fft_sizes=[2048, 1024, 512],
-        hop_sizes=[441, 220, 110],
-        win_lengths=[2048, 1024, 512],
-        window="hann_window",
-        downsample_pooling="AvgPool1d",
-        # follow the official implementation setting
-        downsample_pooling_params={
-            "kernel_size": 4,
-            "stride": 2,
-            "padding": 1,
-            "count_include_pad": False,
-        }
-    ):
-        """Initialize Multi resolution STFT loss module.
-
-        Args:
-            fft_sizes (list): List of FFT sizes.
-            hop_sizes (list): List of hop sizes.
-            win_lengths (list): List of window lengths.
-            window (str): Window function type.
-
-        """
-        super(MultiResolutionSTFTDiscriminator, self).__init__()
-        assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
-        self.stft_discriminator = torch.nn.ModuleList()
-        for fs, ss, wl in zip(fft_sizes, hop_sizes, win_lengths):
-            self.stft_discriminator += [STFTDiscriminator(fft_size=fs, shift_size=ss, win_length=wl, window=window)]
-
-    def forward(self, x):
-        x = x.squeeze(1)
-
-        outs = []
-        for f in self.stft_discriminator:
-            outs += [f(x)]
-        return outs
-
-
-class STFTDiscriminator(torch.nn.Module):
-    """STFT-based discriminator that analyzes the spectral representation of audio.
-
-    This discriminator first transforms the input audio waveform into a magnitude spectrogram
-    using a Short-Time Fourier Transform (STFT). It then passes this spectrogram through a
-    series of 1D convolutional layers to produce a discriminative output. The architecture
-    is designed to identify artifacts and inconsistencies in the frequency domain.
-
-    Args:
-        fft_size (int): The size of the FFT window.
-        shift_size (int): The hop size or step size between consecutive STFT frames.
-        win_length (int): The length of the window function.
-        window (str): The name of the window function to use (e.g., "hann_window").
-        out_channels (int): The number of output channels for the final convolutional layer.
-        kernel_sizes (list of int): A list of two kernel sizes for the convolutional layers.
-        channels (int): The initial number of channels in the convolutional layers.
-        max_downsample_channels (int): The maximum number of channels in the downsampling layers.
-        bias (bool): Whether to include a bias term in the convolutional layers.
-        downsample_scales (list of int): A list of scales for the downsampling operations.
-        nonlinear_activation (str): The name of the non-linear activation function to use.
-        nonlinear_activation_params (dict): Parameters for the non-linear activation function.
-        pad (str): The type of padding to use in the convolutional layers.
-        pad_params (dict): Parameters for the padding function.
+    Time axis: no stride (preserves temporal resolution)
+    Freq axis: halved at each dilation layer → progressively integrates freq info
     """
 
     def __init__(
         self,
-        fft_size=1024,
-        shift_size=120,
-        win_length=600,
-        window="hann_window",
-        out_channels=1,
-        kernel_sizes=[5, 3],
-        channels=64,
-        max_downsample_channels=512,
-        bias=True,
-        downsample_scales=[4, 4],
-        nonlinear_activation="LeakyReLU",
-        nonlinear_activation_params={"negative_slope": 0.2},
-        pad="ReflectionPad1d",
-        pad_params={},
+        filters: int = 32,
+        n_fft: int = 1024,
+        hop_length: int = 256,
+        win_length: int = 1024,
+        kernel_size=(3, 9),
+        dilations=(1, 2, 4),
+        stride=(1, 2),
+        negative_slope: float = 0.2,
     ):
-        super(STFTDiscriminator, self).__init__()
-        self.fft_size = fft_size
-        self.shift_size = shift_size
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
         self.win_length = win_length
-        # NOTE(kan-bayashi): Use register_buffer to fix #223
-        self.register_buffer("window", getattr(torch, window)(win_length))
+        self.activation = nn.LeakyReLU(negative_slope=negative_slope)
 
-        self.layers = torch.nn.ModuleList()
+        # power=None → complex spectrogram output
+        self.spec_transform = torchaudio.transforms.Spectrogram(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window_fn=torch.hann_window,
+            normalized=True,
+            center=False,
+            pad_mode=None,
+            power=None,
+        )
 
-        # check kernel size is valid
-        assert len(kernel_sizes) == 2
-        assert kernel_sizes[0] % 2 == 1
-        assert kernel_sizes[1] % 2 == 1
+        self.convs = nn.ModuleList()
 
-        # add first layer
-        self.layers += [
-            torch.nn.Sequential(
-                getattr(torch.nn, pad)((np.prod(kernel_sizes) - 1) // 2, **pad_params),
-                torch.nn.Conv1d(fft_size // 2 + 1, channels, np.prod(kernel_sizes), bias=bias),
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+        # input: real + imag = 2 channels
+        self.convs.append(
+            _norm_conv2d(
+                2, filters,
+                kernel_size=kernel_size,
+                padding=_get_2d_padding(kernel_size),
             )
-        ]
+        )
 
-        # add downsample layers
-        in_chs = channels
-        for downsample_scale in downsample_scales:
-            out_chs = min(in_chs * downsample_scale, max_downsample_channels)
-            self.layers += [
-                torch.nn.Sequential(
-                    torch.nn.Conv1d(
-                        in_chs, out_chs,
-                        kernel_size=downsample_scale * 6 + 1,
-                        stride=downsample_scale,
-                        padding=downsample_scale * 3,
-                        groups=in_chs // 4,
-                        bias=bias,
-                    ),
-                    getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+        # dilated convs (progressively downsample freq axis)
+        for dilation in dilations:
+            self.convs.append(
+                _norm_conv2d(
+                    filters, filters,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    dilation=(dilation, 1),
+                    padding=_get_2d_padding(kernel_size, (dilation, 1)),
                 )
-            ]
-            in_chs = out_chs
-
-        # add final layers
-        out_chs = min(in_chs * 2, max_downsample_channels)
-        self.layers += [
-            torch.nn.Sequential(
-                torch.nn.Conv1d(
-                    in_chs, out_chs, kernel_sizes[0],
-                    padding=(kernel_sizes[0] - 1) // 2,
-                    bias=bias,
-                ),
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
             )
-        ]
-        self.layers += [
-            torch.nn.Conv1d(
-                out_chs, out_channels, kernel_sizes[1],
-                padding=(kernel_sizes[1] - 1) // 2,
-                bias=bias,
-            ),
-        ]
 
-        # apply weight norm
-        self.apply_weight_norm()
+        # square kernel to integrate local info
+        sq_kernel = (kernel_size[0], kernel_size[0])
+        self.convs.append(
+            _norm_conv2d(
+                filters, filters,
+                kernel_size=sq_kernel,
+                padding=_get_2d_padding(sq_kernel),
+            )
+        )
 
-    def apply_weight_norm(self):
-        """Apply weight normalization module from all of the layers."""
-        def _apply_weight_norm(m):
-            if isinstance(m, torch.nn.Conv1d) or isinstance(m, torch.nn.ConvTranspose1d):
-                torch.nn.utils.weight_norm(m)
-                logging.debug(f"Weight norm is applied to {m}.")
+        # final output: 1 channel (discriminator score)
+        self.conv_post = _norm_conv2d(
+            filters, 1,
+            kernel_size=sq_kernel,
+            padding=_get_2d_padding(sq_kernel),
+        )
 
-        self.apply(_apply_weight_norm)
+    def forward(self, x: torch.Tensor):
+        # x: [B, 1, T]
+        z = self.spec_transform(x)                   # [B, 1, F, T_frames], complex
+        z = torch.cat([z.real, z.imag], dim=1)       # [B, 2, F, T_frames]
+        z = z.permute(0, 1, 3, 2)                    # [B, 2, T_frames, F]
 
-    def forward(self, x):
-        x = stft(x, self.fft_size, self.shift_size, self.win_length, self.window)
         outs = []
-        for f in self.layers:
-            x = f(x)
-            outs += [x]
+        for layer in self.convs:
+            z = layer(z)
+            z = self.activation(z)
+            outs.append(z)
+        z = self.conv_post(z)
+        outs.append(z)  # last element is the discriminator score
         return outs
 
 
-def stft(x, fft_size, hop_size, win_length, window):
-    """Perform STFT and convert to magnitude spectrogram.
+class MultiScaleComplexSTFTDiscriminator(nn.Module):
+    """Multi-scale complex STFT discriminator.
+
+    Default settings for 44.1kHz:
+      - (n_fft=2048, hop=441, win=2048): ~46ms window, coarse time / fine freq
+      - (n_fft=1024, hop=220, win=1024): ~23ms window, medium
+      - (n_fft=512,  hop=110, win=512):  ~12ms window, fine time / coarse freq
+    """
+
+    def __init__(
+        self,
+        filters: int = 32,
+        n_ffts=(2048, 1024, 512),
+        hop_lengths=(441, 220, 110),
+        win_lengths=(2048, 1024, 512),
+        **kwargs,
+    ):
+        super().__init__()
+        assert len(n_ffts) == len(hop_lengths) == len(win_lengths)
+        self.discriminators = nn.ModuleList([
+            ComplexSTFTSubDiscriminator(
+                filters=filters,
+                n_fft=n,
+                hop_length=h,
+                win_length=w,
+                **kwargs,
+            )
+            for n, h, w in zip(n_ffts, hop_lengths, win_lengths)
+        ])
+
+    def forward(self, x: torch.Tensor):
+        return [disc(x) for disc in self.discriminators]
+
+
+# ---------------------------------------------------------------------------
+# Combined discriminator (main entry point)
+# ---------------------------------------------------------------------------
+
+class DiscriminatorWithComplexSTFT(nn.Module):
+    """Combined discriminator: MelGAN MSD (waveform) + Multi-Scale Complex STFT (phase-aware).
+
+    Interface is fully compatible with the old Discriminator class:
+      forward(x) → List[List[Tensor]]
+      Each sublist's [-1] is the discriminator score; [:-1] are feature maps
+      for feature matching loss.
 
     Args:
-        x (Tensor): Input signal tensor (B, T).
-        fft_size (int): FFT size.
-        hop_size (int): Hop size.
-        win_length (int): Window length.
-        window (str): Window function type.
-
-    Returns:
-        Tensor: Magnitude spectrogram (B, #frames, fft_size // 2 + 1).
-
+        use_msd (bool): Whether to include MelGAN MSD. Set False to save memory.
+        stft_filters (int): Number of filters in the complex STFT discriminator.
     """
-    if is_pytorch_17plus:
-        x_stft = torch.stft(x, fft_size, hop_size, win_length, window, return_complex=False)
-    else:
-        x_stft = torch.stft(x, fft_size, hop_size, win_length, window)
-    real = x_stft[..., 0]
-    imag = x_stft[..., 1]
-    # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
-    spectrum = torch.sqrt(torch.clamp(real ** 2 + imag ** 2, min=1e-7))
-    return spectrum
+
+    def __init__(self, use_msd: bool = True, stft_filters: int = 32):
+        super().__init__()
+        self.use_msd = use_msd
+        if use_msd:
+            self.msd = MelGANMultiScaleDiscriminator()
+        self.ms_stft = MultiScaleComplexSTFTDiscriminator(filters=stft_filters)
+
+    def forward(self, x: torch.Tensor):
+        outs = []
+        if self.use_msd:
+            outs += self.msd(x)
+        outs += self.ms_stft(x)
+        return outs
