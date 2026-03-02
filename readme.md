@@ -14,7 +14,7 @@
 <audio controls src="sample_wav/ground_truth.wav"></audio>
 
 **生成された音声:**
-<audio controls src="sample_wav/inference_wav.wav"></audio>
+<audio controls src="output_kiritan/output_onnx.wav"></audio>
 
 ## 特徴
 

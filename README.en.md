@@ -14,7 +14,7 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 <audio controls src="sample_wav/ground_truth.wav"></audio>
 
 **Synthesized Voice:**
-<audio controls src="sample_wav/inference_wav.wav"></audio>
+<audio controls src="output_kiritan/output_onnx.wav"></audio>
 
 ## Features
 
