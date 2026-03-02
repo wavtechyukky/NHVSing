@@ -10,11 +10,21 @@
 
 ## 音声サンプル
 
+### きりたん
+
 **Ground Truth:**
-<audio controls src="sample_wav/ground_truth.wav"></audio>
+<audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
 
 **生成された音声:**
 <audio controls src="output_kiritan/output_onnx.wav"></audio>
+
+### 夏目悠李
+
+**Ground Truth:**
+<audio controls src="sample_wav/ground_truth_natsume.wav"></audio>
+
+**生成された音声:**
+<audio controls src="output_natsume/output_onnx.wav"></audio>
 
 ## 特徴
 
@@ -101,7 +111,23 @@ python train.py
 
 Gradient accumulationおよびAMP（混合精度）に対応しています。`config.yaml` の `gradient_accumulation_steps` と `use_amp` で設定できます。
 
-### 3. モデルのエクスポート
+### 3. Fine-tuning（別話者への転移学習）
+
+学習済みモデルのウェイトだけを引き継いで、別話者のデータセットで学習し直す場合に使います。Discriminator・Optimizerは新規初期化されます。
+
+```bash
+# 例: 夏目悠李 → 東北きりたんFine-tuning
+python prepare_finetune.py \
+  --weights exported_natsume/model.pth \
+  --config config.yaml \
+  --output snapshots_kiritan/000000epoch.pth
+
+python train.py --resume_path snapshots_kiritan/000000epoch.pth
+```
+
+`--weights` にはエクスポート済みの `model.pth`（state_dict）または学習スナップショット（full checkpoint）のどちらも指定できます。
+
+### 4. モデルのエクスポート
 
 学習済みモデル（スナップショット）を推論用の形式にエクスポートします。
 

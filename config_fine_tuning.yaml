@@ -1,0 +1,121 @@
+# config_fine_tuning.yaml
+# Fine-tuning config: all start epochs shifted 200 epochs earlier than config.yaml.
+# Use with prepare_finetune.py to transfer from a pretrained base model.
+
+seed: 42
+device: "cuda"         # "cuda" | "cpu"
+
+preprocess:
+  # パス設定
+  raw_wav_dir: 'dataset/kiritan_raw'
+  resample_wav_dir: 'dataset/kiritan_wav_44100'
+  cut_wav_dir: 'dataset/kiritan_cut_wav'
+  f0_img_dir: 'dataset/kiritan_f0_imgs'
+  npz_dir: 'dataset/kiritan_npz'
+  prefix: "kiritan"
+
+  # 音声設定
+  sample_rate: 44100
+  scale: 1.0
+  f0_min: 150.0
+  f0_max: 800.0
+  f0_extractor: 'harvest'
+  frame_size: 256
+
+  # 無音カット設定（cut_by_phrases アルゴリズム）
+  cut_wavs:
+    silence_thresh: -50.0
+    min_silence_dur: 0.10
+    max_dur: 9.0
+    long_silence: 1.0
+    pad: 0.10
+
+  # メルスペクトログラム設定
+  fft_size: 4096
+  hop_size: 256
+  mel_dim: 128
+  mel_min: 40.0
+  mel_max: 22050.0
+  align_f0_to_spec: false
+
+  # データフィルタリング設定
+  data_filtering:
+    min_frames: 150
+    max_frames: 2500
+    backup_dir: 'dataset/npz_backup'
+
+  # train/test 振り分け設定
+  train_test_split:
+    train: 100
+    test: 1
+
+# 共通で使用するパラメータ
+common_params: &common_params
+  hop_size: 256
+  in_channels: 128
+  conv_channels: 256
+  kernel_size: 3
+  dilation_size: 1
+  group_size: 8
+  use_causal: false
+
+model:
+  vocoder:
+    <<: *common_params
+    sample_rate: 44100
+    noise_std: 0.03
+    use_weight_norm: true
+    conv_type: "original"
+
+  ltv_filter:
+    ccep_size: 512
+    ccep_size_noise: 512
+    fft_size: 1024
+    use_zero_mask: true
+    n_ltv_layers: 2
+    use_quef_norm: false
+
+discriminator:
+  use_msd: true
+  stft_filters: 16
+
+training:
+  train_dir: 'dataset/kiritan_training/train'
+  test_dir: 'dataset/kiritan_training/test'
+  log_dir: './logs_kiritan'
+  snapshot_dir: 'snapshots_kiritan'
+  lr_g: 0.0001
+  lr_d: 0.0002
+  batch_size: 8
+  gradient_accumulation_steps: 8  # effective batch size = 64
+  shuffle: True
+  num_workers: 2
+  max_samples_per_epoch: 1000
+  noise_branch_freeze_epochs: 0
+  adversarial_start: 100          # 300 - 200 (fine-tuning: discriminator adapts faster)
+  adversarial_scale: 2
+  adversarial_warmup_epochs: 100
+  feature_matching_scale: 1
+  envelope_start: 150             # 350 - 200 (fine-tuning: model already trained)
+  envelope_scale: 1.0
+  harmonic_penalty_start: 150    # 350 - 200 (fine-tuning: model already trained)
+  harmonic_penalty_scale: 1000
+  use_amp: true
+  save_interval: 10
+  n_epoch: 801
+  nan_restart_until_epoch: 10
+  snapshot_path: None
+  inference_output_dir: 'dataset/inference_kiritan'
+  window_lengths:
+    - 256
+    - 512
+    - 768
+    - 1024
+    - 1280
+    - 1536
+    - 1792
+    - 2048
+    - 3072
+    - 4096
+    - 6144
+    - 8192

@@ -10,11 +10,21 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
+### Kiritan
+
 **Ground Truth:**
-<audio controls src="sample_wav/ground_truth.wav"></audio>
+<audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
 
 **Synthesized Voice:**
 <audio controls src="output_kiritan/output_onnx.wav"></audio>
+
+### Natsume Yuri (夏目悠李)
+
+**Ground Truth:**
+<audio controls src="sample_wav/ground_truth_natsume.wav"></audio>
+
+**Synthesized Voice:**
+<audio controls src="output_natsume/output_onnx.wav"></audio>
 
 ## Features
 
@@ -101,7 +111,23 @@ python train.py
 
 Gradient accumulation and AMP (mixed precision) are supported. Configure with `gradient_accumulation_steps` and `use_amp` in `config.yaml`.
 
-### 3. Exporting the Model
+### 3. Fine-tuning (Transfer Learning to a New Speaker)
+
+Use this to inherit only the model weights from a trained model and re-train on a different speaker's dataset. The Discriminator and Optimizers are freshly initialized.
+
+```bash
+# Example: Natsume base model → Kiritan fine-tuning
+python prepare_finetune.py \
+  --weights exported_natsume/model.pth \
+  --config config.yaml \
+  --output snapshots_kiritan/000000epoch.pth
+
+python train.py --resume_path snapshots_kiritan/000000epoch.pth
+```
+
+Both an exported `model.pth` (state_dict) and a full training snapshot can be specified for `--weights`.
+
+### 4. Exporting the Model
 
 Exports the trained model (snapshot) into formats for inference.
 
