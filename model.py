@@ -47,6 +47,12 @@ class NHVSing(nn.Module):
         }
         self.convs_onnx = NHVConvsONNX(ltv_params)
 
+        # Zero-initialize output layers: ccep≈0 → flat spectrum at init → prevents exp() overflow
+        for conv_module in [self.convs_onnx.conv_harmonic, self.convs_onnx.conv_noise]:
+            last_layer = conv_module.conv_layers[-1]
+            nn.init.zeros_(last_layer.conv1d.weight)
+            nn.init.zeros_(last_layer.conv1d.bias)
+
         # DSP functions (not part of the ONNX graph)
         self.impulse_generator = generate_impulse_train
 
