@@ -84,8 +84,8 @@ training:
   test_dir: 'dataset/kiritan_training/test'
   log_dir: './logs_kiritan'
   snapshot_dir: 'snapshots_kiritan'
-  lr_g: 0.001
-  lr_d: 0.001
+  lr_g: 0.0001
+  lr_d: 0.0002
   batch_size: 8
   gradient_accumulation_steps: 8  # effective batch size = 64
   shuffle: True
@@ -97,7 +97,7 @@ training:
   adversarial_warmup_epochs: 100
   feature_matching_scale: 1
   envelope_scale: 1.0
-  harmonic_penalty_scale: 10000  # L1 penalty for harmonic output in unvoiced regions
+  harmonic_penalty_scale: 100  # L1 penalty for harmonic output in unvoiced regions
   use_amp: true
   save_interval: 10
   n_epoch: 801
