@@ -10,21 +10,17 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
-### Tohoku Kiritan (東北きりたん) — [Zunko Project](https://zunko.jp/kiridev/login.php)
+### Tohoku Kiritan Sample
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
+**Ground Truth:** [ground_truth_kiritan.wav](sample_wav/ground_truth_kiritan.wav)
 
-**Synthesized Voice:**
-<audio controls src="output_kiritan/output_onnx.wav"></audio>
+**Synthesized Voice:** [output_onnx.wav](output_kiritan/output_onnx.wav)
 
-### Natsume Yuri (夏目悠李) — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
+### Natsume Yuri Sample
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth_natsume.wav"></audio>
+**Ground Truth:** [ground_truth_natsume.wav](sample_wav/ground_truth_natsume.wav)
 
-**Synthesized Voice:**
-<audio controls src="output_natsume/output_onnx.wav"></audio>
+**Synthesized Voice:** [output_onnx.wav](output_natsume/output_onnx.wav)
 
 ## Features
 
@@ -188,3 +184,8 @@ This repository is based on the following papers and repositories published by L
 *   [https://github.com/xcmyz/FastVocoder/tree/main](https://github.com/xcmyz/FastVocoder/tree/main)
 *   [https://github.com/zjlww/dsp](https://github.com/zjlww/dsp)
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
+
+## Singing voice database used
+
+*   Tohoku Kiritan — [Zunko Project](https://zunko.jp/kiridev/login.php)
+*   Natsume Yuri — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
