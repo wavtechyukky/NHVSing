@@ -10,7 +10,7 @@
 
 ## 音声サンプル
 
-### きりたん
+### 東北きりたん
 
 **Ground Truth:**
 <audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>

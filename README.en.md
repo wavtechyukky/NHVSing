@@ -10,7 +10,7 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
-### Kiritan
+### Tohoku Kiritan (東北きりたん)
 
 **Ground Truth:**
 <audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
