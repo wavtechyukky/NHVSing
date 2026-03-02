@@ -327,8 +327,9 @@ def run(args, force_restart: bool = False):
 
     # --- 学習パラメータ ---
     harmonic_penalty_scale = cfg['training'].get('harmonic_penalty_scale', 0.0)
+    harmonic_penalty_start = cfg['training'].get('harmonic_penalty_start', 0)
     if harmonic_penalty_scale > 0:
-        print(f"harmonic_penalty_scale={harmonic_penalty_scale}: unvoiced harmonic penalty enabled")
+        print(f"harmonic_penalty_scale={harmonic_penalty_scale}, start={harmonic_penalty_start}: unvoiced harmonic penalty enabled")
     adversarial_start = cfg['training']['adversarial_start']
     adversarial_scale = cfg['training']['adversarial_scale']
     print("adversarial_scale:", adversarial_scale)
@@ -423,7 +424,7 @@ def run(args, force_restart: bool = False):
                     total_loss = total_loss + env_loss * envelope_scale / accum_steps
                     del env_loss
 
-                if harmonic_penalty_scale > 0:
+                if harmonic_penalty_scale > 0 and epoch > harmonic_penalty_start:
                     # uv: (B, 1, T_frames) -> (B, 1, T_samples)
                     uv_resampled = uv.repeat_interleave(hop_size, dim=-1)
                     T = min(sig_harm.size(-1), uv_resampled.size(-1))
