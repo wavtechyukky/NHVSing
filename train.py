@@ -336,10 +336,11 @@ def run(args, force_restart: bool = False):
     feature_matching_scale = cfg['training']['feature_matching_scale']
     adversarial_warmup_epochs = cfg['training'].get('adversarial_warmup_epochs', 0)
     envelope_scale = cfg['training'].get('envelope_scale', 0.0)
+    envelope_start = cfg['training'].get('envelope_start', 0)
     envelope_kernel = cfg['training'].get('envelope_kernel_size', hop_size * 2)
     envelope_stride = cfg['training'].get('envelope_stride', hop_size)
     if envelope_scale > 0:
-        print(f"envelope_loss: scale={envelope_scale}, kernel={envelope_kernel}, stride={envelope_stride}")
+        print(f"envelope_loss: scale={envelope_scale}, start={envelope_start}, kernel={envelope_kernel}, stride={envelope_stride}")
     window_lengths = cfg['training']['window_lengths']
     fft_lengths = [int(2 * i) for i in window_lengths]
     hop_lengths = [int(i / 4) for i in window_lengths]
@@ -416,7 +417,7 @@ def run(args, force_restart: bool = False):
                 stft_loss_epoch += stft_loss.item()  # log at original scale
                 del stft_loss
 
-                if envelope_scale > 0:
+                if envelope_scale > 0 and epoch > envelope_start:
                     env_loss = envelope_loss_fn(
                         est_n, wav_n, envelope_kernel, envelope_stride
                     )

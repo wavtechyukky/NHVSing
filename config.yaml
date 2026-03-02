@@ -96,6 +96,7 @@ training:
   adversarial_scale: 2
   adversarial_warmup_epochs: 100
   feature_matching_scale: 1
+  envelope_start: 350           # epoch to start applying envelope loss
   envelope_scale: 1.0
   harmonic_penalty_start: 350  # epoch to start applying harmonic penalty
   harmonic_penalty_scale: 1000  # L1 penalty for harmonic output in unvoiced regions
