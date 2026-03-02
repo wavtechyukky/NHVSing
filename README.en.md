@@ -83,8 +83,9 @@ python preprocess.py --step all
 Each step can also be run individually.
 
 ```bash
+python preprocess.py --step resample  # Resampling
 python preprocess.py --step cut      # Silence trimming
-python preprocess.py --step create   # Create npz (F0 · mel spectrogram)
+python preprocess.py --step npz      # Create npz (F0 · mel spectrogram)
 python preprocess.py --step split    # Train/test split
 ```
 

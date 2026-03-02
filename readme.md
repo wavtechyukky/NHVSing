@@ -83,8 +83,9 @@ python preprocess.py --step all
 各ステップを個別に実行することも可能です。
 
 ```bash
+python preprocess.py --step resample  # リサンプリング
 python preprocess.py --step cut      # 無音カット
-python preprocess.py --step create   # npz作成（F0・メルスペクトログラム）
+python preprocess.py --step npz      # npz作成（F0・メルスペクトログラム）
 python preprocess.py --step split    # train/test振り分け
 ```
 
