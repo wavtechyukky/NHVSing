@@ -10,7 +10,7 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
-### Tohoku Kiritan (東北きりたん)
+### Tohoku Kiritan (東北きりたん) — [Zunko Project](https://zunko.jp/kiridev/login.php)
 
 **Ground Truth:**
 <audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
@@ -18,7 +18,7 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 **Synthesized Voice:**
 <audio controls src="output_kiritan/output_onnx.wav"></audio>
 
-### Natsume Yuri (夏目悠李)
+### Natsume Yuri (夏目悠李) — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
 
 **Ground Truth:**
 <audio controls src="sample_wav/ground_truth_natsume.wav"></audio>
