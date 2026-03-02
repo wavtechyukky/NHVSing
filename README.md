@@ -10,21 +10,17 @@
 
 ## 音声サンプル
 
-### 東北きりたん — [Zunko Project](https://zunko.jp/kiridev/login.php)
+### 東北きりたんサンプル
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth_kiritan.wav"></audio>
+**Ground Truth:** [ground_truth_kiritan.wav](sample_wav/ground_truth_kiritan.wav)
 
-**生成された音声:**
-<audio controls src="output_kiritan/output_onnx.wav"></audio>
+**生成された音声:** [output_onnx.wav](output_kiritan/output_onnx.wav)
 
-### 夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
+### 夏目悠李サンプル
 
-**Ground Truth:**
-<audio controls src="sample_wav/ground_truth_natsume.wav"></audio>
+**Ground Truth:** [ground_truth_natsume.wav](sample_wav/ground_truth_natsume.wav)
 
-**生成された音声:**
-<audio controls src="output_natsume/output_onnx.wav"></audio>
+**生成された音声:** [output_onnx.wav](output_natsume/output_onnx.wav)
 
 ## 特徴
 
@@ -188,3 +184,8 @@ python inference.py input.wav \
 *   [https://github.com/xcmyz/FastVocoder/tree/main](https://github.com/xcmyz/FastVocoder/tree/main)
 *   [https://github.com/zjlww/dsp](https://github.com/zjlww/dsp)
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
+
+## 使用した歌声データベース
+
+*   東北きりたん — [Zunko Project](https://zunko.jp/kiridev/login.php)
+*   夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
