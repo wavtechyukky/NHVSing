@@ -53,7 +53,7 @@
 * **Discriminator**: Multi-Scale Waveform Discriminator + Multi-Scale Complex STFT Discriminatorを使用。既存学習の崩壊を防ぐため、Adversarial lossにwarmup期間を設けており、学習途中からのFine-tuningにも対応する（`adversarial_warmup_epochs`）
 * **損失関数の追加**:
     * **Envelope loss**: 1D max-poolingで上下包絡を抽出しMAEを計算（RefineGAN §2.5.1）。振幅包絡の不安定化を抑制する（`envelope_scale`）
-    * **Harmonic penalty loss**: 無声区間（F0=0のフレーム）で有声成分（`sig_harm`）が出力されることへのL1ペナルティ。無声区間でブザーような音が生成されることを抑制する（`harmonic_penalty_scale`）
+    * **Harmonic penalty loss**: 無声区間（F0=0のフレーム）で有声成分（`sig_harm`）が出力されることへのL1ペナルティ。無声区間でブザーのような音が生成されることを抑制する（`harmonic_penalty_scale`）
 * **quef_norm**: デフォルトでオフ（`use_quef_norm: false`）。オンにすると高周波数帯の学習が阻害されることが実験で確認されたため
 * **入力特徴量**:
     * **logメルスペクトログラム**: **40Hz〜22050Hz**のlogメルスペクトログラムを入力とする。論文では高周波数帯をカットしているが、高周波数帯の再現度が直感的な品質の向上に必要であると判断した。
