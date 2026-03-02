@@ -122,7 +122,7 @@ python prepare_finetune.py \
   --config config.yaml \
   --output snapshots_kiritan/000000epoch.pth
 
-python train.py --resume_path snapshots_kiritan/000000epoch.pth
+python train.py --resume_path snapshots_kiritan/000000epoch.pth --config config_fine_tuning.yaml
 ```
 
 `--weights` にはエクスポート済みの `model.pth`（state_dict）または学習スナップショット（full checkpoint）のどちらも指定できます。
