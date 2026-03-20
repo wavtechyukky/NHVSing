@@ -189,3 +189,5 @@ python inference.py input.wav \
 
 *   東北きりたん — [Zunko Project](https://zunko.jp/kiridev/login.php)
 *   夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
+*   M4Singer (CC BY-NC-SA 4.0) — [M4Singer GitHub](https://github.com/M4Singer/M4Singer)
+    *   Zhang et al., "M4Singer: a Multi-Style, Multi-Singer and Musical Score Provided Mandarin Singing Corpus," *NeurIPS 2022*.
