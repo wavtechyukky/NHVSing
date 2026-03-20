@@ -1,8 +1,10 @@
 import sys
+import os
 import argparse
 import yaml
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import shutil
 
 import matplotlib
@@ -25,6 +27,63 @@ def load_config(path: str) -> dict:
     """Load a YAML configuration file."""
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+# --- Worker function for parallel NPZ creation ---
+
+def _process_one_wav(wav_path_str: str, output_dir_str: str, cfg: dict) -> str:
+    """1 ファイルを処理するワーカー関数（ProcessPoolExecutor から呼ばれる）。
+
+    トップレベルに定義しないと pickle できないため、ここに置く。
+    戻り値は "ok" / "skip" / "error:<メッセージ>" の文字列。
+    """
+    wav_path   = Path(wav_path_str)
+    output_dir = Path(output_dir_str)
+    save_path  = output_dir / f"{wav_path.stem}.npz"
+
+    if save_path.exists():
+        return "skip"
+
+    y, sr = sf.read(wav_path)
+    y = y * cfg['scale']
+    if sr != cfg['sample_rate']:
+        return f"error:sample_rate mismatch {sr} != {cfg['sample_rate']} ({wav_path.name})"
+
+    frame_size = cfg['frame_size']
+    y = y[:frame_size * (len(y) // frame_size)]
+
+    frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
+    f0_raw, _ = pw.harvest(
+        y.astype(np.float64), sr,
+        f0_floor=cfg['f0_min'],
+        f0_ceil=cfg['f0_max'],
+        frame_period=frame_period,
+    )
+
+    S = librosa.feature.melspectrogram(
+        y=y,
+        sr=cfg['sample_rate'],
+        n_fft=cfg['fft_size'],
+        hop_length=cfg['hop_size'],
+        win_length=cfg['hop_size'] * 4,
+        n_mels=cfg['mel_dim'],
+        fmin=cfg['mel_min'],
+        fmax=cfg['mel_max'],
+        center=True,
+    )
+    log_melspc = librosa.power_to_db(S, ref=1.0).T  # (T, D)
+
+    hop_size = cfg['hop_size']
+    n_frames = min(len(f0_raw), len(log_melspc))
+    final_n_frames = min(n_frames * hop_size, len(y)) // hop_size
+
+    np.savez(
+        save_path,
+        f0=f0_raw[:final_n_frames],
+        log_melspc=log_melspc[:final_n_frames],
+        wav=y[:final_n_frames * hop_size],
+    )
+    return "ok"
 
 
 # --- Dataset Creation Steps ---
@@ -110,13 +169,13 @@ def step_cut_wavs(input_dir: Path, output_dir: Path, cfg: dict):
     if max_seg_len_s > 0:
         print(f"Max length of cut audio: {max_seg_len_s:.2f} seconds")
 
-def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict):
+def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict, num_workers: int):
     """Extract features from WAV files and save them in NPZ format."""
     print(f"\n--- Step 3: Creating NPZ files ---")
-    print(f"Input dir: {input_dir}")
-    print(f"Output dir: {output_dir}")
-
-    print(f"min={cfg['f0_min']}, fmax={cfg['f0_max']}")
+    print(f"Input dir  : {input_dir}")
+    print(f"Output dir : {output_dir}")
+    print(f"num_workers: {num_workers}")
+    print(f"f0_min={cfg['f0_min']}, f0_max={cfg['f0_max']}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     wav_paths = sorted(list(input_dir.glob("*.wav")))
@@ -125,60 +184,23 @@ def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict):
         print("Warning: No WAV files found in the input directory.")
         return
 
-    for wav_path in tqdm(wav_paths, desc="Creating NPZ"):
-        # Determine output path and skip if it exists
-        save_path = output_dir / f"{wav_path.stem}.npz"
-        if save_path.exists():
-            continue
+    n_ok = n_skip = n_err = 0
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_process_one_wav, str(p), str(output_dir), cfg): p
+            for p in wav_paths
+        }
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Creating NPZ"):
+            result = future.result()
+            if result == "ok":
+                n_ok += 1
+            elif result == "skip":
+                n_skip += 1
+            else:
+                n_err += 1
+                print(f"\n  ERROR: {result}")
 
-        y, sr = sf.read(wav_path)
-        y = y * cfg['scale']
-        assert sr == cfg['sample_rate']
-
-        frame_size = cfg['frame_size']
-        y = y[:frame_size * (len(y) // frame_size)]
-
-        # F0 estimation (pyworld harvest)
-        # librosa center=True and pyworld both center frame k at k*hop_size, so no shift needed.
-        frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
-        f0_raw, _ = pw.harvest(
-            y.astype(np.float64), sr,
-            f0_floor=cfg['f0_min'],
-            f0_ceil=cfg['f0_max'],
-            frame_period=frame_period,
-        )
-
-        # Log mel-spectrogram (librosa power_to_db, shape: (T, D))
-        S = librosa.feature.melspectrogram(
-            y=y,
-            sr=cfg['sample_rate'],
-            n_fft=cfg['fft_size'],
-            hop_length=cfg['hop_size'],
-            win_length=cfg['hop_size'] * 4,
-            n_mels=cfg['mel_dim'],
-            fmin=cfg['mel_min'],
-            fmax=cfg['mel_max'],
-            center=True,
-        )
-        log_melspc = librosa.power_to_db(S, ref=1.0).T  # (T, D)  — 絶対スケール保持
-
-        # Align the lengths of F0, mel-spectrogram, and waveform
-        hop_size = cfg['hop_size']
-
-        n_frames = min(len(f0_raw), len(log_melspc))
-        final_n_frames = min(n_frames * hop_size, len(y)) // hop_size
-
-        f0_trimmed = f0_raw[:final_n_frames]
-        log_melspc_trimmed = log_melspc[:final_n_frames]
-        wav_trimmed = y[:final_n_frames * hop_size]
-
-        # Save to NPZ file
-        np.savez(
-            save_path,
-            f0=f0_trimmed,
-            log_melspc=log_melspc_trimmed,
-            wav=wav_trimmed
-        )
+    print(f"完了: {n_ok} 処理, {n_skip} スキップ, {n_err} エラー")
 
 def step_plot_f0_validation(npz_dir: Path, img_dir: Path, cfg: dict):
     """Plots F0 and mel-spectrogram from NPZ files and saves them as images."""
@@ -348,6 +370,7 @@ def main():
     parser = argparse.ArgumentParser(description="Audio dataset preprocessing script", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration file")
     parser.add_argument("--step", type=str, default="all", choices=["all", "resample", "cut", "npz", "plot", "filter", "split"], help="Select the processing step to execute")
+    parser.add_argument("--num_workers", type=int, default=os.cpu_count(), help="Number of parallel workers for the npz step")
     args = parser.parse_args()
 
     try:
@@ -372,7 +395,7 @@ def main():
         step_cut_wavs(resample_wav_dir, cut_wav_dir, p_cfg)
 
     if args.step in ["all", "npz"]:
-        step_create_npz(cut_wav_dir, npz_dir, p_cfg)
+        step_create_npz(cut_wav_dir, npz_dir, p_cfg, args.num_workers)
 
     if args.step in ["all", "plot"]:
         step_plot_f0_validation(npz_dir, f0_img_dir, p_cfg)

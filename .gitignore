@@ -42,5 +42,8 @@ CHANGELOG.md
 # Old reference code
 20260302/
 
+# Local work folder (handover docs, temp files)
+update/
+
 # Training result folders (e.g. kiritan_1000epoch/)
 *epoch/
