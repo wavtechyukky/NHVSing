@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHV-Sing Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+      line-height: 1.6;
+    }
+
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 48px 24px 40px;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+    header p  { font-size: 1rem; color: #adb5bd; max-width: 680px; margin: 0 auto; }
+    header a  { color: #74c0fc; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+
+    main { max-width: 960px; margin: 0 auto; padding: 40px 20px 80px; }
+
+    section { margin-bottom: 56px; }
+    h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; padding-bottom: 8px;
+         border-bottom: 2px solid #dee2e6; }
+    h3 { font-size: 1.05rem; font-weight: 600; margin: 24px 0 10px; color: #495057; }
+    .section-note { font-size: 0.85rem; color: #6c757d; margin-bottom: 16px; }
+    .section-note a { color: #6c757d; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      margin-bottom: 8px;
+    }
+    th {
+      background: #343a40;
+      color: #fff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 12px 16px;
+      text-align: center;
+    }
+    th:first-child { text-align: left; }
+    td {
+      padding: 10px 16px;
+      border-bottom: 1px solid #f1f3f5;
+      vertical-align: middle;
+      text-align: center;
+    }
+    td:first-child { text-align: left; font-weight: 500; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: #f8f9fa; }
+
+    audio {
+      width: 100%;
+      min-width: 140px;
+      height: 32px;
+    }
+
+    .badge-unseen {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+      font-weight: 600;
+      background: #fff3cd;
+      color: #856404;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>NHV-Sing</h1>
+  <p>
+    Neural Homomorphic Vocoder tuned for singing voice synthesis.<br>
+    <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub Repository</a>
+    &nbsp;·&nbsp;
+    <a href="https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf" target="_blank">Original Paper (Liu et al., 2020)</a>
+  </p>
+</header>
+
+<main>
+
+  <!-- ===== Kiritan & Natsume ===== -->
+  <section>
+    <h2>Kiritan &amp; Natsume</h2>
+    <p class="section-note">
+      Comparing speaker-specific training vs. M4Singer fine-tuning on Japanese singing voice.
+      "Trained (speaker)": model trained exclusively on each speaker's data.
+      "M4Singer fine-tuned": model fine-tuned on
+      <a href="https://github.com/M4Singer/M4Singer" target="_blank">M4Singer</a>
+      (20 Mandarin singers), then applied to these speakers.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Speaker</th>
+          <th>Ground Truth</th>
+          <th>Trained (speaker)</th>
+          <th>M4Singer fine-tuned</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Tohoku Kiritan <span class="badge-unseen">unseen</span></td>
+          <td><audio controls src="audio/kiritan_gt.wav"></audio></td>
+          <td><audio controls src="audio/kiritan_trained.wav"></audio></td>
+          <td><audio controls src="audio/kiritan_m4singer.wav"></audio></td>
+        </tr>
+        <tr>
+          <td>Natsume Yuri</td>
+          <td><audio controls src="audio/natsume_gt.wav"></audio></td>
+          <td><audio controls src="audio/natsume_trained.wav"></audio></td>
+          <td><audio controls src="audio/natsume_m4singer.wav"></audio></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ===== M4Singer ===== -->
+  <section>
+    <h2>M4Singer Fine-tuning Samples</h2>
+    <p class="section-note">
+      Samples from the <a href="https://github.com/M4Singer/M4Singer" target="_blank">M4Singer dataset</a>
+      (Zhang et al., NeurIPS 2022 · <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a>).
+      Ground truth audio is included for research demonstration purposes with full attribution.<br>
+      <strong>Note:</strong> The M4Singer fine-tuned model is designed as a general-purpose vocoder
+      capable of synthesizing a wide pitch range across diverse speakers.
+      However, as these samples suggest, better quality can be achieved by focusing on
+      a specific speaker and narrower pitch range.
+    </p>
+
+    <h3>Alto (7 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>M4Singer fine-tuned</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Alto-1</td><td><audio controls src="audio/Alto-1_gt.wav"></audio></td><td><audio controls src="audio/Alto-1_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-2</td><td><audio controls src="audio/Alto-2_gt.wav"></audio></td><td><audio controls src="audio/Alto-2_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-3</td><td><audio controls src="audio/Alto-3_gt.wav"></audio></td><td><audio controls src="audio/Alto-3_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-4</td><td><audio controls src="audio/Alto-4_gt.wav"></audio></td><td><audio controls src="audio/Alto-4_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-5</td><td><audio controls src="audio/Alto-5_gt.wav"></audio></td><td><audio controls src="audio/Alto-5_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-6</td><td><audio controls src="audio/Alto-6_gt.wav"></audio></td><td><audio controls src="audio/Alto-6_m4singer.wav"></audio></td></tr>
+        <tr><td>Alto-7</td><td><audio controls src="audio/Alto-7_gt.wav"></audio></td><td><audio controls src="audio/Alto-7_m4singer.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Soprano (3 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>M4Singer fine-tuned</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Soprano-1</td><td><audio controls src="audio/Soprano-1_gt.wav"></audio></td><td><audio controls src="audio/Soprano-1_m4singer.wav"></audio></td></tr>
+        <tr><td>Soprano-2</td><td><audio controls src="audio/Soprano-2_gt.wav"></audio></td><td><audio controls src="audio/Soprano-2_m4singer.wav"></audio></td></tr>
+        <tr><td>Soprano-3</td><td><audio controls src="audio/Soprano-3_gt.wav"></audio></td><td><audio controls src="audio/Soprano-3_m4singer.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Bass (3 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>M4Singer fine-tuned</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Bass-1</td><td><audio controls src="audio/Bass-1_gt.wav"></audio></td><td><audio controls src="audio/Bass-1_m4singer.wav"></audio></td></tr>
+        <tr><td>Bass-2</td><td><audio controls src="audio/Bass-2_gt.wav"></audio></td><td><audio controls src="audio/Bass-2_m4singer.wav"></audio></td></tr>
+        <tr><td>Bass-3</td><td><audio controls src="audio/Bass-3_gt.wav"></audio></td><td><audio controls src="audio/Bass-3_m4singer.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Tenor (7 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>M4Singer fine-tuned</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Tenor-1</td><td><audio controls src="audio/Tenor-1_gt.wav"></audio></td><td><audio controls src="audio/Tenor-1_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-2</td><td><audio controls src="audio/Tenor-2_gt.wav"></audio></td><td><audio controls src="audio/Tenor-2_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-3</td><td><audio controls src="audio/Tenor-3_gt.wav"></audio></td><td><audio controls src="audio/Tenor-3_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-4</td><td><audio controls src="audio/Tenor-4_gt.wav"></audio></td><td><audio controls src="audio/Tenor-4_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-5</td><td><audio controls src="audio/Tenor-5_gt.wav"></audio></td><td><audio controls src="audio/Tenor-5_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-6</td><td><audio controls src="audio/Tenor-6_gt.wav"></audio></td><td><audio controls src="audio/Tenor-6_m4singer.wav"></audio></td></tr>
+        <tr><td>Tenor-7</td><td><audio controls src="audio/Tenor-7_gt.wav"></audio></td><td><audio controls src="audio/Tenor-7_m4singer.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+  </section>
+
+</main>
+
+</body>
+</html>
