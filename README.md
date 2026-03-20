@@ -10,17 +10,9 @@
 
 ## 音声サンプル
 
-### 東北きりたんサンプル
+→ **[デモページで試聴する](https://wavtechyukky.github.io/NHVSing/)**
 
-**Ground Truth:** [ground_truth_kiritan.wav](sample_wav/ground_truth_kiritan.wav)
-
-**生成された音声:** [output_onnx.wav](output_kiritan/output_onnx.wav)
-
-### 夏目悠李サンプル
-
-**Ground Truth:** [ground_truth_natsume.wav](sample_wav/ground_truth_natsume.wav)
-
-**生成された音声:** [output_onnx.wav](output_natsume/output_onnx.wav)
+きりたん・夏目悠李（話者特化モデル）、およびM4Singer fine-tunedモデルによる生成音声をまとめて聴き比べできます。
 
 ## 特徴
 

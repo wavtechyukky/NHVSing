@@ -10,17 +10,9 @@ This is a vocoder model based on the paper [Neural Homomorphic Vocoder](https://
 
 ## Audio Samples
 
-### Tohoku Kiritan Sample
+→ **[Listen on the Demo Page](https://wavtechyukky.github.io/NHVSing/)**
 
-**Ground Truth:** [ground_truth_kiritan.wav](sample_wav/ground_truth_kiritan.wav)
-
-**Synthesized Voice:** [output_onnx.wav](output_kiritan/output_onnx.wav)
-
-### Natsume Yuri Sample
-
-**Ground Truth:** [ground_truth_natsume.wav](sample_wav/ground_truth_natsume.wav)
-
-**Synthesized Voice:** [output_onnx.wav](output_natsume/output_onnx.wav)
+Audio comparisons for Kiritan & Natsume (speaker-specific models) and the M4Singer fine-tuned model are available on the demo page.
 
 ## Features
 
