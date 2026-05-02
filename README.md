@@ -24,10 +24,10 @@
 
 | | NHVSing | NHVSingV2 |
 |---|---|---|
-| CNN backbone | Dual-branch（Harmonic/Noise独立） | Shared trunk（共有幹CNN） |
+| CNN backbone | Dual-branch（Harmonic/Noise独立） | Shared trunk（CNNを共有） |
 | F0入力 | メルスペクトログラムのみ | F0 embedder（256 bins, log₂スケール, 128-dim）を追加結合 |
 | quef_norm | オフ（V1では高周波学習が阻害されたため） | alpha=0.3のソフトスケーリング（高周波を犠牲にせず安定化） |
-| 振幅拡張 | なし | 0.5〜2.0×（log-uniform）でランダムスケール |
+| 学習時の振幅拡張 | なし | 0.5〜2.0×（log-uniform）でランダムスケール |
 | 話者汎用性 | **単一話者特化**。学習話者以外ではアーティファクトが出やすい | **多話者対応**。M4Singer・ACE-Opencpop等の多話者コーパスで学習可能 |
 | 設定ファイル | `config.yaml` | `config_v2.yaml` |
 
