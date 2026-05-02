@@ -4,52 +4,81 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。元の論文で提案された構造を踏襲しつつ、歌声合成への適用を考慮した変更を加えています。
+[Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。
+
+本リポジトリには **NHVSing**（単一話者特化モデル）と **NHVSingV2**（多話者汎用モデル）の2つのモデルクラスが含まれます。
 
 ***
 
 ## 音声サンプル
 
-→ **[デモページで試聴する](https://wavtechyukky.github.io/NHVSing/)**
+→ **[NHVSingV2 デモページで試聴する](https://wavtechyukky.github.io/NHVSing/v2.html)**
 
-きりたん・夏目悠李（話者特化モデル）、およびM4Singer fine-tunedモデルによる生成音声をまとめて聴き比べできます。
+→ [NHVSing (V1) デモページ](https://wavtechyukky.github.io/NHVSing/)
 
-## 特徴
+きりたん・夏目悠李（NHVSing）、およびM4Singer・GTSinger評価データ（NHVSingV2）による生成音声を聴き比べできます。
 
-### 性能
+***
 
-*   **軽量・高速:** 4MB程度のモデルサイズでありながら、一般的なPCのCPU環境でも非常に高速な推論を実現します。
-*   **高い再現性:** 話者の声質を忠実に再現します。
-*   **安定した品質:** F0（基本周波数）に忠実で、ロングトーンも破綻なく安定して合成できます。
+## NHVSing と NHVSingV2 の違い
 
-本ボコーダーのRTF（Real-Time Factor）および平均推論時間は、以下の環境と条件で測定されました。
+| | NHVSing | NHVSingV2 |
+|---|---|---|
+| CNN backbone | Dual-branch（Harmonic/Noise独立） | Shared trunk（共有幹CNN） |
+| F0入力 | メルスペクトログラムのみ | F0 embedder（256 bins, log₂スケール, 128-dim）を追加結合 |
+| quef_norm | オフ（V1では高周波学習が阻害されたため） | alpha=0.3のソフトスケーリング（高周波を犠牲にせず安定化） |
+| 振幅拡張 | なし | 0.5〜2.0×（log-uniform）でランダムスケール |
+| 話者汎用性 | **単一話者特化**。学習話者以外ではアーティファクトが出やすい | **多話者対応**。M4Singer・ACE-Opencpop等の多話者コーパスで学習可能 |
+| 設定ファイル | `config.yaml` | `config_v2.yaml` |
+
+NHVSingは単一話者のデータセットで学習することで、その話者の声質を忠実に再現することに優れています。一方NHVSingV2は多話者コーパスで学習することにより、様々な話者の音響特徴量を高品質にボコードすることが可能です。
+
+***
+
+## 性能
+
+以下の環境・条件で測定しました。
 
 - **測定環境:** Apple M-series CPU（MacBook）
-- **測定条件:**
-    - 入力音声サンプリングレート: 44.1kHz
-    - 入力音声の長さ: 約26秒
-    - バッチサイズ: 1
+- **測定条件:** 入力44.1kHz・約26秒・バッチサイズ1
+
+### NHVSing（V1）
 
 | Model Type     | Device | Avg. Inference Time | RTF      |
 |----------------|--------|---------------------|----------|
-| Native Python  | CPU    | 1.923 sec           | 0.0740   |
-| JIT Script     | CPU    | 1.935 sec           | 0.0745   |
-| Unified ONNX   | CPU    | 4.586 sec           | 0.1765   |
+| Native Python  | CPU    | 2.048 sec           | 0.0788   |
+| JIT Script     | CPU    | 2.145 sec           | 0.0825   |
+| Unified ONNX   | CPU    | 4.275 sec           | 0.1645   |
 
-### オリジナル実装との差異
-元の論文の実装から以下の点を変更しています。（一部のパラメータはconfig.yamlから編集可能）
+### NHVSingV2
+
+| Model Type     | Device | Avg. Inference Time | RTF      |
+|----------------|--------|---------------------|----------|
+| Native Python  | CPU    | 1.920 sec           | 0.0739   |
+| JIT Script     | CPU    | 1.991 sec           | 0.0766   |
+| Unified ONNX   | CPU    | 4.043 sec           | 0.1556   |
+
+***
+
+## アーキテクチャ
+
+元の論文の実装から以下の点を変更しています。
 
 * **サンプリング周波数**: **44.1kHz**に対応
 * **複素ケプストラム**: 次元数を**512次元**に拡張
-* **FIR（postfilter）の削除**: STFT損失の低下には寄与するものの、処理が遅くなり、直感的に重要となる波形の学習に寄与しないと判断
-* **Discriminator**: Multi-Scale Waveform Discriminator + Multi-Scale Complex STFT Discriminatorを使用。既存学習の崩壊を防ぐため、Adversarial lossにwarmup期間を設けており、学習途中からのFine-tuningにも対応する（`adversarial_warmup_epochs`）
+* **FIR（postfilter）の削除**: STFT損失の低下には寄与するものの、波形の学習に寄与しないと判断
+* **Discriminator**: Multi-Scale Waveform Discriminator + Multi-Scale Complex STFT Discriminatorを使用。Adversarial lossにwarmup期間を設けており、学習途中からのFine-tuningにも対応（`adversarial_warmup_epochs`）
 * **損失関数の追加**:
     * **Envelope loss**: 1D max-poolingで上下包絡を抽出しMAEを計算（RefineGAN §2.5.1）。振幅包絡の不安定化を抑制する（`envelope_scale`）
-    * **Harmonic penalty loss**: 無声区間（F0=0のフレーム）で有声成分（`sig_harm`）が出力されることへのL1ペナルティ。無声区間でブザーのような音が生成されることを抑制する（`harmonic_penalty_scale`）
-* **quef_norm**: デフォルトでオフ（`use_quef_norm: false`）。オンにすると高周波数帯の学習が阻害されることが実験で確認されたため
-* **入力特徴量**:
-    * **logメルスペクトログラム**: **40Hz〜22050Hz**のlogメルスペクトログラムを入力とする。論文では高周波数帯をカットしているが、高周波数帯の再現度が直感的な品質の向上に必要であると判断した。
-    * **F0**: **無声区間を線形補完**したF0を入力とし、Unvoiced/Voicedフラグを不要にした。歌声合成では無声区間も含めてF0カーブを描けることが重視されるだけでなく、論文のようにUVフラグによって挙動を変える場合、なめらかな無声区間→有声区間の推移が再現できない。
+    * **Harmonic penalty loss**: 無声区間（F0=0のフレーム）で有声成分（`sig_harm`）が出力されることへのL1ペナルティ。無声区間でのブザー音を抑制する（`harmonic_penalty_scale`）
+* **F0入力**: **無声区間を線形補完**したF0を入力とし、Unvoiced/Voicedフラグを不要にした。歌声合成では無声区間も含めてF0カーブを描けることが重要で、UVフラグによる挙動切り替えでは無声→有声のなめらかな推移が再現できない
+* **logメルスペクトログラム**: **40Hz〜22050Hz**の全帯域を入力とする。高周波数帯の再現度が直感的な品質向上に寄与すると判断した
+
+### NHVSingV2 固有の変更点
+
+* **Shared trunk CNN** (`use_shared_trunk: true`): HarmonicとNoiseの両ブランチが共有の幹CNNを通ってからそれぞれのヘッドへ分岐する。これによって入力された音響特徴量を、HarmonicとNoiseのどちらを支配的にして生成すべきかを、両者が独立して学習する必要がなくなった。
+* **F0 Embedder** (`use_f0_embed: true`): 連続F0を256ビンのlog₂スケールで離散化し、128次元に埋め込んでメルスペクトログラムと結合する。ネットワークに明示的な音高情報を与えることで、生成すべき一周期分の波形の手がかりが増える。
+* **quef_norm** (`use_quef_norm: true`, `quef_norm_alpha: 0.3`): ケフレンシー成分に1/|n|^αの緩やかなスケーリングをかけ、高次倍音を抑制しすぎずに学習を安定化させる。V1ではオンにすると高周波数帯の阻害されたが、V2ではalphaを0.3と小さく設定することで高周波を犠牲にせず安定化できることが確認された
 
 ### エクスポート形式
 
@@ -67,101 +96,140 @@
 pip install -r requirements.txt
 ```
 
+***
+
 ## 使い方
 
-### 1. 前処理
+### NHVSing（V1）の場合
 
-WAVファイルからモデルの学習に必要な特徴量（npz形式）を抽出します。
+#### 1. 前処理
 
 ```bash
 # WAVカット → F0/メル抽出 → train/test振り分けをまとめて実行
-python preprocess.py --step all
+python preprocess.py --config config.yaml --step all
 ```
 
-各ステップを個別に実行することも可能です。
+#### 2. 学習
 
 ```bash
-python preprocess.py --step resample  # リサンプリング
-python preprocess.py --step cut       # 無音カット
-python preprocess.py --step npz       # npz作成（F0・メルスペクトログラム）
-python preprocess.py --step split     # train/test振り分け
+python train.py --config config.yaml
 ```
 
-train/test比率は `config.yaml` の `preprocess.train_test_split` で設定できます（デフォルト: 100:1）。
+#### 3. Fine-tuning（別話者への転移学習）
 
-### 2. 学習
-
-モデルの学習を開始します。`config.yaml` の `training.log_dir` にTensorboardログが、`training.snapshot_dir` にスナップショットが保存されます。
+学習済みモデルのウェイトのみを引き継ぎ、別話者のデータセットで再学習します。DiscriminatorとOptimizerは新規初期化されます。
 
 ```bash
-python train.py
-```
-
-Gradient accumulationおよびAMP（混合精度）に対応しています。`config.yaml` の `gradient_accumulation_steps` と `use_amp` で設定できます。
-
-### 3. Fine-tuning（新しい話者への転移学習）
-
-学習済みモデルのウェイトのみを引き継ぎ、別の話者のデータセットで再学習する場合に使います。DiscriminatorとOptimizerは新規初期化されます。
-
-```bash
-# 例: 夏目悠李ベースモデル → きりたんFine-tuning
 python prepare_finetune.py \
-  --weights exported_natsume/model.pth \
+  --weights exported_models/natsume/model.pth \
   --config config.yaml \
   --output snapshots_kiritan/000000epoch.pth
 
 python train.py --resume_path snapshots_kiritan/000000epoch.pth --config config_fine_tuning.yaml
 ```
 
-`--weights` には、エクスポートした `model.pth`（state_dict）と学習スナップショットのどちらも指定可能です。
-
-### 4. モデルのエクスポート
-
-学習済みモデル（スナップショット）を推論用の形式にエクスポートします。
+#### 4. エクスポート
 
 ```bash
-# PyTorchネイティブ + JIT + Unified ONNXをまとめてエクスポート
 python export.py \
   --checkpoint snapshots/000990epoch.pth \
   --config config.yaml \
-  --output_dir exported_models \
-  --pytorch \
-  --jit \
-  --full_onnx
+  --output_dir exported_models/kiritan \
+  --all
 ```
 
-| オプション     | 出力ファイル              | 説明                       |
-|----------------|---------------------------|----------------------------|
-| `--pytorch`    | `model.pth`               | state_dict（再学習・Fine-tuning用）|
-| `--jit`        | `model_jit.pt`            | TorchScript（他言語連携用）|
-| `--full_onnx`  | `full_vocoder.onnx`       | 単一ONNXファイル           |
-
-### 5. 推論
-
-エクスポートしたモデルを使って、WAVまたはNPZファイルから音声を生成します。
+#### 5. 推論
 
 ```bash
-# PyTorchモデルで推論（Native + JITの速度比較も実施）
 python inference.py input.wav \
-  --snapshot exported_models/model.pth \
-  --config config.yaml \
-  --output_dir output
-
-# Unified ONNXも同時に計測する場合
-python inference.py input.wav \
-  --snapshot exported_models/model.pth \
+  --snapshot exported_models/kiritan/model.pth \
   --config config.yaml \
   --output_dir output \
-  --onnx exported_models/full_vocoder.onnx
+  --onnx exported_models/kiritan/full_vocoder.onnx
 ```
+
+---
+
+### NHVSingV2 の場合
+
+`config_v2.yaml` を起点として使います。パス・話者プレフィックス・学習パラメータを環境に合わせて編集してください。
+
+#### 1. 前処理
+
+F0抽出にRMVPEを使用します（初回実行時にモデルを自動ダウンロード）。
+
+```bash
+python preprocess.py --config config_v2.yaml --step all
+```
+
+#### 2. 学習
+
+```bash
+python train.py --config config_v2.yaml
+```
+
+#### 3. Fine-tuning（別話者・別コーパスへの転移学習）
+
+```bash
+python prepare_finetune.py \
+  --weights exported_models/v2/model.pth \
+  --config config_v2.yaml \
+  --output snapshots_finetune/000000epoch.pth
+
+python train.py --resume_path snapshots_finetune/000000epoch.pth --config config_v2.yaml
+```
+
+#### 4. エクスポート
+
+```bash
+python export.py \
+  --checkpoint snapshots_v2/000900epoch.pth \
+  --config config_v2.yaml \
+  --output_dir exported_models/v2 \
+  --all
+```
+
+#### 5. 推論
+
+```bash
+python inference.py input.wav \
+  --snapshot exported_models/v2/model.pth \
+  --config config_v2.yaml \
+  --output_dir output \
+  --onnx exported_models/v2/full_vocoder.onnx
+```
+
+WAV入力の場合、`config_v2.yaml` の `target_rms: 0.083` が設定されていれば有声区間のRMSをM4Singer学習データの中央値に自動正規化します。
+
+***
+
+## 学習のベストプラクティス
+
+### 振幅拡張（`amp_augment`）
+
+NHVSingV2では学習時に音量を0.5〜2.0倍（log-uniform）でランダムスケールする振幅拡張を導入しています（`amp_augment: true`, `amp_aug_range: [0.5, 2.0]`）。これにより、入力音量の変動に対してモデルが頑健になり、推論時の音量合わせが多少ずれても品質が劣化しにくくなります。
+
+### quef_norm のスケール（`quef_norm_alpha`）
+
+`use_quef_norm: true` にすることでケフレンシー成分を正規化し、学習の安定性が向上します。ただしalphaを大きくしすぎると高周波数帯（子音・摩擦音）の再現度が低下します。`quef_norm_alpha: 0.3` が高周波を犠牲にせずに安定化できる妥当な値です。
+
+### Harmonic penalty loss の強さ（`harmonic_penalty_scale`）
+
+無声区間（F0=0フレーム）でハーモニック成分が漏れ出すことを抑制するペナルティです。この値は品質に大きく影響します。
+
+* 小さすぎる（0〜10程度）: 無声区間でブザーのような音が発生しやすい
+* 大きすぎる（1000以上）: 有声/無声か怪しい音響特徴量が与えられた時に、本来は有声区間であっても、無声音でメルスペクトログラムを再現しようとしてしまう。
+* **推奨値: `harmonic_penalty_scale: 100`**
 
 ***
 
 ## 課題点
 
-*   **学習プロセス:** 複数のGPUの使用を想定しておりません。
-*   **他のフレームサイズへの対応:** デフォルトのフレームサイズ（hop_size=256）のみで動作確認しています。他のフレームサイズでの動作は保証していません。
-*   **話者依存性:** 生成される波形には学習させた話者の特徴が反映され、多人数の声を再現することは難しいです。その代わり、FastSpeech2のような曖昧な音響特徴量を入れてもリアルな質感の声にしてくれます。
+*   **学習プロセス:** 複数のGPUの使用を想定していません。
+*   **他のフレームサイズへの対応:** hop_size=512にすると非常に品質が落ちます。
+*   **NHVSing（V1）の話者依存性:** 生成される波形には学習させた話者の特徴が強く反映されます。多話者対応が必要な場合はNHVSingV2を使用してください。
+
+***
 
 ## ライセンス
 
@@ -169,7 +237,7 @@ python inference.py input.wav \
 
 ## 謝辞
 
-このリポジトリは、Liu, et al.によって発表された以下の論文やリポジトリに基づいています。
+このリポジトリは、Liu, et al.によって発表された以下の論文・リポジトリに基づいています。
 
 *   Z. Liu, Y. Wang, K. Chen and Y. Jia, "Neural Homomorphic Vocoder," *Proc. Interspeech 2020*, pp. 3500-3504, doi: 10.21437/Interspeech.2020-2325.
 *   [https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)
@@ -183,3 +251,4 @@ python inference.py input.wav \
 *   夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
 *   M4Singer (CC BY-NC-SA 4.0) — [M4Singer GitHub](https://github.com/M4Singer/M4Singer)
     *   Zhang et al., "M4Singer: a Multi-Style, Multi-Singer and Musical Score Provided Mandarin Singing Corpus," *NeurIPS 2022*.
+*   ACE-Opencpop — [HuggingFace](https://huggingface.co/datasets/espnet/ace-opencpop-segments)

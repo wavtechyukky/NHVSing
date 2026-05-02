@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHVSingV2 Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8f9fa;
+      color: #212529;
+      line-height: 1.6;
+    }
+
+    header {
+      background: #1a1a2e;
+      color: #fff;
+      padding: 48px 24px 40px;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+    header p  { font-size: 1rem; color: #adb5bd; max-width: 760px; margin: 0 auto 8px; }
+    header a  { color: #74c0fc; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    .header-nav { margin-top: 14px; font-size: 0.88rem; }
+
+    main { max-width: 1000px; margin: 0 auto; padding: 40px 20px 80px; }
+
+    .intro {
+      background: #fff;
+      border-left: 4px solid #4dabf7;
+      border-radius: 0 8px 8px 0;
+      padding: 16px 20px;
+      margin-bottom: 48px;
+      font-size: 0.92rem;
+      color: #343a40;
+    }
+    .intro ul { margin: 6px 0 0 18px; }
+    .intro li { margin-bottom: 2px; }
+
+    section { margin-bottom: 56px; }
+    h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; padding-bottom: 8px;
+         border-bottom: 2px solid #dee2e6; }
+    h3 { font-size: 1.05rem; font-weight: 600; margin: 24px 0 10px; color: #495057; }
+    .section-note { font-size: 0.85rem; color: #6c757d; margin-bottom: 16px; }
+    .section-note a { color: #6c757d; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      margin-bottom: 8px;
+    }
+    th {
+      background: #343a40;
+      color: #fff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 12px 16px;
+      text-align: center;
+    }
+    th:first-child { text-align: left; }
+    td {
+      padding: 10px 16px;
+      border-bottom: 1px solid #f1f3f5;
+      vertical-align: middle;
+      text-align: center;
+    }
+    td:first-child { text-align: left; font-weight: 500; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: #f8f9fa; }
+
+    audio {
+      width: 100%;
+      min-width: 140px;
+      height: 32px;
+    }
+
+    .badge-unseen {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+      font-weight: 600;
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.82rem;
+      color: #adb5bd;
+      padding: 32px 20px;
+      border-top: 1px solid #dee2e6;
+    }
+    footer a { color: #adb5bd; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>NHVSingV2 Demo</h1>
+  <p>
+    A single multi-speaker Neural Homomorphic Vocoder trained on diverse singing corpora.
+  </p>
+  <p>
+    <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub Repository</a>
+    &nbsp;·&nbsp;
+    <a href="https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf" target="_blank">Original Paper (Liu et al., 2020)</a>
+    &nbsp;·&nbsp;
+    <a href="index.html">← NHVSing (V1) Demo</a>
+  </p>
+</header>
+
+<main>
+
+  <div class="intro">
+    <strong>NHVSingV2</strong> is trained on a mixture of corpora:
+    <ul>
+      <li>M4Singer — 18 singers (Soprano-3 and Bass-1 excluded due to F0 extraction issues)</li>
+      <li>ACE-Opencpop — tenor and below</li>
+      <li>Tohoku Kiritan (Japanese)</li>
+      <li>Natsume Yuri (Japanese)</li>
+    </ul>
+    <br>
+    Unlike V1, which required a separate model per speaker, <strong>NHVSingV2 uses a single unified model</strong>
+    for all speakers. The comparisons below show how V2 improves multi-speaker generalization
+    and robustness to unseen voices.
+  </div>
+
+
+  <!-- ===== M4Singer ===== -->
+  <section>
+    <h2>M4Singer — Trained Corpus</h2>
+    <p class="section-note">
+      Test samples from <a href="https://github.com/M4Singer/M4Singer" target="_blank">M4Singer</a>
+      (Zhang et al., NeurIPS 2022 · <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a>).
+      All samples are from the <strong>test split</strong> (not seen during training).
+      <strong>NHVSing (V1)</strong> uses a model trained on M4Singer only.
+      <strong>NHVSingV2</strong> uses the single unified model.
+    </p>
+
+    <h3>Alto (7 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Alto-1</td><td><audio controls src="audio_v2/m4singer/Alto-1_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-1_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-1_v2.wav"></audio></td></tr>
+        <tr><td>Alto-2</td><td><audio controls src="audio_v2/m4singer/Alto-2_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-2_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-2_v2.wav"></audio></td></tr>
+        <tr><td>Alto-3</td><td><audio controls src="audio_v2/m4singer/Alto-3_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-3_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-3_v2.wav"></audio></td></tr>
+        <tr><td>Alto-4</td><td><audio controls src="audio_v2/m4singer/Alto-4_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-4_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-4_v2.wav"></audio></td></tr>
+        <tr><td>Alto-5</td><td><audio controls src="audio_v2/m4singer/Alto-5_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-5_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-5_v2.wav"></audio></td></tr>
+        <tr><td>Alto-6</td><td><audio controls src="audio_v2/m4singer/Alto-6_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-6_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-6_v2.wav"></audio></td></tr>
+        <tr><td>Alto-7</td><td><audio controls src="audio_v2/m4singer/Alto-7_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-7_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Alto-7_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Soprano (2 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Soprano-1</td><td><audio controls src="audio_v2/m4singer/Soprano-1_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Soprano-1_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Soprano-1_v2.wav"></audio></td></tr>
+        <tr><td>Soprano-2</td><td><audio controls src="audio_v2/m4singer/Soprano-2_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Soprano-2_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Soprano-2_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Bass (2 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Bass-2</td><td><audio controls src="audio_v2/m4singer/Bass-2_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Bass-2_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Bass-2_v2.wav"></audio></td></tr>
+        <tr><td>Bass-3</td><td><audio controls src="audio_v2/m4singer/Bass-3_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Bass-3_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Bass-3_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Tenor (7 singers)</h3>
+    <table>
+      <thead>
+        <tr><th>Singer</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Tenor-1</td><td><audio controls src="audio_v2/m4singer/Tenor-1_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-1_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-1_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-2</td><td><audio controls src="audio_v2/m4singer/Tenor-2_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-2_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-2_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-3</td><td><audio controls src="audio_v2/m4singer/Tenor-3_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-3_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-3_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-4</td><td><audio controls src="audio_v2/m4singer/Tenor-4_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-4_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-4_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-5</td><td><audio controls src="audio_v2/m4singer/Tenor-5_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-5_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-5_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-6</td><td><audio controls src="audio_v2/m4singer/Tenor-6_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-6_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-6_v2.wav"></audio></td></tr>
+        <tr><td>Tenor-7</td><td><audio controls src="audio_v2/m4singer/Tenor-7_gt.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-7_m4singer.wav"></audio></td><td><audio controls src="audio_v2/m4singer/Tenor-7_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ===== Kiritan ===== -->
+  <section>
+    <h2>Tohoku Kiritan — Trained Corpus</h2>
+    <p class="section-note">
+      Test samples from <a href="https://zunko.jp/kiridev/login.php" target="_blank">Tohoku Kiritan</a> (Zunko Project).
+      All samples are from the <strong>test split</strong> (not seen during training).
+      <strong>NHVSing (V1)</strong> uses a model trained exclusively on Kiritan data.
+      <strong>NHVSingV2</strong> uses the single unified model.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Sample</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>kiritan_09_0006</td><td><audio controls src="audio_v2/kiritan/kiritan_09_0006_gt.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_09_0006_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_09_0006_v2.wav"></audio></td></tr>
+        <tr><td>kiritan_18_0007</td><td><audio controls src="audio_v2/kiritan/kiritan_18_0007_gt.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_18_0007_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_18_0007_v2.wav"></audio></td></tr>
+        <tr><td>kiritan_28_0002</td><td><audio controls src="audio_v2/kiritan/kiritan_28_0002_gt.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_28_0002_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_28_0002_v2.wav"></audio></td></tr>
+        <tr><td>kiritan_37_0010</td><td><audio controls src="audio_v2/kiritan/kiritan_37_0010_gt.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_37_0010_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_37_0010_v2.wav"></audio></td></tr>
+        <tr><td>kiritan_46_0011</td><td><audio controls src="audio_v2/kiritan/kiritan_46_0011_gt.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_46_0011_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/kiritan/kiritan_46_0011_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ===== Natsume ===== -->
+  <section>
+    <h2>Natsume Yuri — Trained Corpus</h2>
+    <p class="section-note">
+      Test samples from <a href="https://ksdcm1ng.wixsite.com/njksofficial" target="_blank">Natsume Yuri</a> (NJKS Official).
+      All samples are from the <strong>test split</strong> (not seen during training).
+      <strong>NHVSing (V1)</strong> uses a model trained exclusively on Natsume data.
+      <strong>NHVSingV2</strong> uses the single unified model.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Sample</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>natsume_3_0000</td><td><audio controls src="audio_v2/natsume/natsume_natsume_3_0000_gt.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_3_0000_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_3_0000_v2.wav"></audio></td></tr>
+        <tr><td>natsume_17_0006</td><td><audio controls src="audio_v2/natsume/natsume_natsume_17_0006_gt.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_17_0006_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_17_0006_v2.wav"></audio></td></tr>
+        <tr><td>natsume_28_0004</td><td><audio controls src="audio_v2/natsume/natsume_natsume_28_0004_gt.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_28_0004_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_28_0004_v2.wav"></audio></td></tr>
+        <tr><td>natsume_48_0002</td><td><audio controls src="audio_v2/natsume/natsume_natsume_48_0002_gt.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_48_0002_nhvsing.wav"></audio></td><td><audio controls src="audio_v2/natsume/natsume_natsume_48_0002_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ===== GTSinger ===== -->
+  <section>
+    <h2>GTSinger — Unseen Data <span class="badge-unseen">unseen</span></h2>
+    <p class="section-note">
+      Samples from <a href="https://github.com/GTSinger/GTSinger" target="_blank">GTSinger</a>,
+      a multilingual singing corpus covering 9 languages — completely unseen by both models.
+      NHV generates periodic components by repeating a single cycle of the waveform,
+      which means it is sensitive to reverberant recordings and voices with unstable periodicity.
+      These samples serve as a stress test of generalization to near-arbitrary inputs.<br><br>
+      <strong>NHVSing (V1)</strong> uses the M4Singer-trained model.
+      <strong>NHVSingV2</strong> uses the single unified model.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Sample</th><th>Ground Truth</th><th>NHVSing (V1)</th><th>NHVSingV2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DE · Soprano-1 — Danke</td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Soprano-1__Danke__0002_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Soprano-1__Danke__0002_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Soprano-1__Danke__0002_v2.wav"></audio></td></tr>
+        <tr><td>DE · Tenor-1 — Widmung</td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Tenor-1__Widmung__0002_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Tenor-1__Widmung__0002_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/DE-Tenor-1__Widmung__0002_v2.wav"></audio></td></tr>
+        <tr><td>EN · Alto-1 — my love</td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-1__my love__0005_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-1__my love__0005_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-1__my love__0005_v2.wav"></audio></td></tr>
+        <tr><td>EN · Alto-2 — My Love</td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-2__My Love__0004_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-2__My Love__0004_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Alto-2__My Love__0004_v2.wav"></audio></td></tr>
+        <tr><td>EN · Tenor-1 — Million Reasons</td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Tenor-1__Million Reasons__0000_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Tenor-1__Million Reasons__0000_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/EN-Tenor-1__Million Reasons__0000_v2.wav"></audio></td></tr>
+        <tr><td>ES · Soprano-1 — Loveyourself</td>
+          <td><audio controls src="audio_v2/gtsinger/ES-Soprano-1__Loveyourself__0000_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/ES-Soprano-1__Loveyourself__0000_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/ES-Soprano-1__Loveyourself__0000_v2.wav"></audio></td></tr>
+        <tr><td>FR · Soprano-1 — à la vie comme à la mort</td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Soprano-1__a la vie comme a la mort__0000_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Soprano-1__a la vie comme a la mort__0000_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Soprano-1__a la vie comme a la mort__0000_v2.wav"></audio></td></tr>
+        <tr><td>FR · Tenor-1 — quel trouble</td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Tenor-1__quel trouble__0018_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Tenor-1__quel trouble__0018_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/FR-Tenor-1__quel trouble__0018_v2.wav"></audio></td></tr>
+        <tr><td>IT · Bass-2 — Per la gloria d'adorarvi</td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Bass-2__Per la gloria d'adorarvi__0003_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Bass-2__Per la gloria d'adorarvi__0003_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Bass-2__Per la gloria d'adorarvi__0003_v2.wav"></audio></td></tr>
+        <tr><td>IT · Soprano-1 — controvento</td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Soprano-1__controvento__0001_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Soprano-1__controvento__0001_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/IT-Soprano-1__controvento__0001_v2.wav"></audio></td></tr>
+        <tr><td>KO · Soprano-1 — chantey</td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Soprano-1__chantey__0001_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Soprano-1__chantey__0001_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Soprano-1__chantey__0001_v2.wav"></audio></td></tr>
+        <tr><td>KO · Tenor-1 — 향기만 남아</td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Tenor-1__향기만 남아__0006_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Tenor-1__향기만 남아__0006_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/KO-Tenor-1__향기만 남아__0006_v2.wav"></audio></td></tr>
+        <tr><td>RU · Alto-1 — Аня Облонская</td>
+          <td><audio controls src="audio_v2/gtsinger/RU-Alto-1__Аня Облонская__0001_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/RU-Alto-1__Аня Облонская__0001_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/RU-Alto-1__Аня Облонская__0001_v2.wav"></audio></td></tr>
+        <tr><td>ZH · Alto-1 — 鸽子</td>
+          <td><audio controls src="audio_v2/gtsinger/ZH-Alto-1__鸽子__0004_gt.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/ZH-Alto-1__鸽子__0004_m4singer.wav"></audio></td>
+          <td><audio controls src="audio_v2/gtsinger/ZH-Alto-1__鸽子__0004_v2.wav"></audio></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+
+  <!-- ===== Acknowledgements ===== -->
+  <section>
+    <h2>Acknowledgements</h2>
+    <p class="section-note" style="font-size:0.9rem; color:#343a40;">
+      This page includes audio derived from the following datasets, used for research demonstration purposes.
+    </p>
+    <ul style="margin-left:20px; font-size:0.9rem; line-height:2;">
+      <li>
+        <strong>Tohoku Kiritan</strong> —
+        <a href="https://zunko.jp/kiridev/login.php" target="_blank">Zunko Project</a>
+      </li>
+      <li>
+        <strong>Natsume Yuri</strong> —
+        <a href="https://ksdcm1ng.wixsite.com/njksofficial" target="_blank">NJKS Official</a>
+      </li>
+      <li>
+        <strong>M4Singer</strong> (CC BY-NC-SA 4.0) —
+        Zhang et al., "M4Singer: a Multi-Style, Multi-Singer and Musical Score Provided Mandarin Singing Corpus," <em>NeurIPS 2022</em>.
+        <a href="https://github.com/M4Singer/M4Singer" target="_blank">GitHub</a>
+      </li>
+      <li>
+        <strong>ACE-Opencpop</strong> —
+        <a href="https://huggingface.co/datasets/espnet/ace-opencpop-segments" target="_blank">HuggingFace</a>
+      </li>
+      <li>
+        <strong>GTSinger</strong> —
+        <a href="https://github.com/GTSinger/GTSinger" target="_blank">GitHub</a>
+      </li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">wavtechyukky/NHVSing</a>
+  &nbsp;·&nbsp; MIT License
+</footer>
+
+</body>
+</html>

@@ -1,18 +1,14 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 torch
-torchvision
 torchaudio
-matplotlib
-pyworld
 numpy
+scipy
+librosa
 soundfile
 PyYAML
+matplotlib
 tqdm
-onnxruntime-gpu
-pytorch-lightning
-librosa
 tensorboard
-pyreaper
-pydub
+pyworld
 onnx
-onnxscript
+onnxruntime

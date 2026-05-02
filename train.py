@@ -17,7 +17,7 @@ import soundfile as sf
 import librosa
 
 from dataset import VocoderDataset, collate_fn_padd, norm_interp_f0
-from model import NHVSing
+from model import NHVSing, NHVSingV2
 from discriminator import DiscriminatorWithComplexSTFT
 from dsp import stft_loss as stft_loss_fn, envelope_loss as envelope_loss_fn
 import glob
@@ -134,6 +134,22 @@ def plot_spectrogram(spectrogram, title="", vmin=None, vmax=None):
     return fig
 
 
+def plot_mel_diff(diff, title="", vmax=20):
+    """diff: (mel_dim, T), fake_mel - real_mel [dB]"""
+    fig, ax = plt.subplots(figsize=(12, 4))
+    im = ax.imshow(diff, aspect="auto", origin="lower",
+                   interpolation='none', vmin=-vmax, vmax=vmax, cmap='RdBu_r')
+    fig.colorbar(im, ax=ax, label='dB (fake − real)')
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel('Frame')
+    ax.set_ylabel('Mel bin')
+    fig.tight_layout()
+    fig.canvas.draw()
+    plt.close()
+    return fig
+
+
 def inference(model, npz_path, device, cfg):
     model.eval()
 
@@ -173,16 +189,80 @@ def inference(model, npz_path, device, cfg):
     return synthesized, real_mel, fake_mel
 
 
+def _select_tb_files(npz_paths: list, n_per_singer: int) -> list:
+    """歌手ごとに最大 n_per_singer 件を選んで返す。
+    ファイル名の '#' 前の部分（例: Alto-1）を歌手IDとして使う。
+    歌手IDが取れない場合（'#' なし）はそのまま通す。
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for p in npz_paths:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        # '#' があれば "#" 前 (例: Alto-1#newboy_0000 → Alto-1)
+        # なければ最初の '_' 前 (例: Alto-1_newboy_0000 → Alto-1)
+        singer = stem.split('#')[0] if '#' in stem else stem.split('_')[0]
+        groups[singer].append(p)
+    result = []
+    for singer in sorted(groups):
+        result.extend(groups[singer][:n_per_singer])
+    return result
+
+
+def inference_pinpoint_files(model, device, writer, epoch, cfg, logged_real_mels: set):
+    """tb_pinpoint_files に列挙した npz を必ず全件ログに記録する。
+    別の SummaryWriter（{log_dir}_pinpoint）に書くので TensorBoard で独立した run として表示される。
+    """
+    pinpoint_paths = cfg['training'].get('tb_pinpoint_files', [])
+    if not pinpoint_paths:
+        return
+
+    sample_rate = cfg['preprocess']['sample_rate']
+    for npz_path in pinpoint_paths:
+        if not os.path.exists(npz_path):
+            print(f"  [pinpoint] not found, skip: {npz_path}")
+            continue
+        try:
+            wav, real_mel, fake_mel = inference(model, npz_path, device, cfg)
+        except Exception as e:
+            print(f"  [pinpoint] inference error {npz_path}: {e}")
+            continue
+
+        basename = os.path.splitext(os.path.basename(npz_path))[0]
+
+        if basename not in logged_real_mels:
+            writer.add_figure('plot/' + basename + '/real',
+                              plot_spectrogram(real_mel.T, title=f"real: {basename}",
+                                               vmin=-80, vmax=0), 0)
+            real_wav = np.load(npz_path)['wav']
+            writer.add_audio('audio/' + basename + '/real',
+                             torch.from_numpy(real_wav).unsqueeze(0), 0, sample_rate)
+            logged_real_mels.add(basename)
+
+        writer.add_figure('plot/' + basename + '/fake',
+                          plot_spectrogram(fake_mel.T, title=f"fake: {basename}  ep{epoch}",
+                                           vmin=-80, vmax=0), epoch)
+        writer.add_audio('audio/' + basename + '/fake',
+                         torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
+
+        min_T = min(real_mel.shape[0], fake_mel.shape[0])
+        diff = fake_mel[:min_T] - real_mel[:min_T]  # (T, mel_dim)
+        writer.add_figure('mel_diff/' + basename,
+                          plot_mel_diff(diff.T, title=f"diff: {basename}  ep{epoch}"), epoch)
+
+
 def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set):
     test_data_folder = cfg['training']['test_dir']
     all_npz_paths = sorted(glob.glob(os.path.join(test_data_folder, '**/*.npz'), recursive=True))
+
+    n_per_singer = cfg['training'].get('tb_files_per_singer', 0)
+    if n_per_singer > 0:
+        all_npz_paths = _select_tb_files(all_npz_paths, n_per_singer)
 
     inference_output_base_dir = Path(cfg['training'].get('inference_output_dir', 'dataset/inference'))
     save_dir = inference_output_base_dir / f"{epoch}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     sample_rate = cfg['preprocess']['sample_rate']
-
     for i, npz_path in enumerate(all_npz_paths):
         wav, real_mel, fake_mel = inference(model, npz_path, device, cfg)
 
@@ -204,6 +284,11 @@ def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set
         writer.add_audio('audio/' + basename + '/fake',
                          torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
 
+        min_T = min(real_mel.shape[0], fake_mel.shape[0])
+        diff = fake_mel[:min_T] - real_mel[:min_T]  # (T, mel_dim)
+        writer.add_figure('mel_diff/' + basename,
+                          plot_mel_diff(diff.T, title=f"diff: {basename}  ep{epoch}"), epoch)
+
         save_path = save_dir / f"{i:03d}.wav"
         sf.write(save_path, wav, sample_rate)
 
@@ -220,11 +305,18 @@ def run(args, force_restart: bool = False):
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     writer = SummaryWriter(log_dir=log_dir)
+    pinpoint_log_dir = Path(str(log_dir) + '_pinpoint')
+    pinpoint_writer = SummaryWriter(log_dir=pinpoint_log_dir) \
+        if cfg['training'].get('tb_pinpoint_files') else None
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = NHVSing(
+    ltv_filter_cfg = cfg['model']['ltv_filter']
+    use_v2 = ltv_filter_cfg.get('use_shared_trunk', False)
+    ModelClass = NHVSingV2 if use_v2 else NHVSing
+    print(f"Model: {ModelClass.__name__}")
+    model = ModelClass(
         vocoder_cfg=cfg['model']['vocoder'],
-        ltv_filter_cfg=cfg['model']['ltv_filter'],
+        ltv_filter_cfg=ltv_filter_cfg,
     ).to(device)
 
     disc_cfg = cfg.get('discriminator', {})
@@ -251,7 +343,12 @@ def run(args, force_restart: bool = False):
           f"{cfg['training']['batch_size'] * accum_steps})")
 
     hop_size = cfg['preprocess']['hop_size']
-    train_dataset = VocoderDataset(dataset_dir=cfg['training']['train_dir'], hop_size=hop_size)
+    amp_augment = cfg['training'].get('amp_augment', False)
+    amp_aug_range = tuple(cfg['training'].get('amp_aug_range', [0.5, 2.0]))
+    if amp_augment:
+        print(f"amp_augment: enabled, range={amp_aug_range}")
+    train_dataset = VocoderDataset(dataset_dir=cfg['training']['train_dir'], hop_size=hop_size,
+                                   augment=amp_augment, amp_aug_range=amp_aug_range)
     max_train_frames = cfg['training'].get('max_train_frames', None)
     collate_train = make_capped_collate(max_train_frames, hop_size=hop_size)
     if max_train_frames:
@@ -324,6 +421,7 @@ def run(args, force_restart: bool = False):
 
     # real_mel は固定なので basename ごとに初回のみ TensorBoard に記録する
     logged_real_mels: set = set()
+    pinpoint_logged_reals: set = set()
 
     # --- 学習パラメータ ---
     harmonic_penalty_scale = cfg['training'].get('harmonic_penalty_scale', 0.0)
@@ -380,7 +478,7 @@ def run(args, force_restart: bool = False):
             mask = mask.to(device)
 
             if harmonic_penalty_scale > 0:
-                est_source, sig_harm = model.forward_train(
+                est_source, sig_harm, sig_noise = model.forward_train(
                     log_melspc, f0, noise_std=effective_noise_std)
             else:
                 est_source = model(log_melspc, f0, noise_std=effective_noise_std)
@@ -522,7 +620,7 @@ def run(args, force_restart: bool = False):
                 del est_source, log_melspc, f0, mask
             del wav, wav_n, est_n, uv
             if harmonic_penalty_scale > 0:
-                del sig_harm
+                del sig_harm, sig_noise
 
         toc = time.time()
 
@@ -560,8 +658,12 @@ def run(args, force_restart: bool = False):
             save_checkpoint(model, discriminator, optimizer_g, optimizer_d, epoch, save_path)
             print(f"Saved model at {save_path}")
             inference_test_data(model, device, writer, epoch, cfg, logged_real_mels)
+            if pinpoint_writer is not None:
+                inference_pinpoint_files(model, device, pinpoint_writer, epoch, cfg, pinpoint_logged_reals)
 
     writer.close()
+    if pinpoint_writer is not None:
+        pinpoint_writer.close()
     print("Training finished.")
 
 

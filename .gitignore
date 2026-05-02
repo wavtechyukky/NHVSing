@@ -16,12 +16,21 @@ wav.zip
 *.pth
 output*.wav
 
+# V2 exported models — track these explicitly (like exported_kiritan etc.)
+!exported_models/
+!exported_models/**
+
+# Demo WAV outputs — track explicitly (reference audio for demo page)
+!wav/
+!wav/**
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
 *.ipynb
+!demo_v2.ipynb
 
 # macOS
 .DS_Store
@@ -30,6 +39,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Temp / experiment outputs
+output_test*/
 cepstrum_comparison.png
 inference_test/
 m4singer_onnx_test*/
@@ -44,6 +54,10 @@ CHANGELOG.md
 
 # Local work folder (handover docs, temp files)
 update/
+temp/
+
+# VSCode workspace file (local only)
+*.code-workspace
 
 # Training result folders (e.g. kiritan_1000epoch/)
 *epoch/

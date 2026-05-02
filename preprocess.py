@@ -17,9 +17,24 @@ import soundfile as sf
 from scipy.signal import resample_poly
 import librosa
 
-import pyworld as pw
+try:
+    import pyworld as pw
+    _PYWORLD_AVAILABLE = True
+except ImportError:
+    _PYWORLD_AVAILABLE = False
 
 from tools.cut_by_phrases import detect_regions, build_segments
+
+
+def _interpolate_f0(f0: np.ndarray) -> np.ndarray:
+    """Linearly interpolate F0 over unvoiced (zero) regions."""
+    f0 = f0.copy()
+    voiced = f0 > 0
+    if not voiced.any():
+        return f0
+    indices = np.arange(len(f0))
+    f0 = np.interp(indices, indices[voiced], f0[voiced])
+    return f0
 
 # --- Utility Functions ---
 
@@ -52,13 +67,37 @@ def _process_one_wav(wav_path_str: str, output_dir_str: str, cfg: dict) -> str:
     frame_size = cfg['frame_size']
     y = y[:frame_size * (len(y) // frame_size)]
 
-    frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
-    f0_raw, _ = pw.harvest(
-        y.astype(np.float64), sr,
-        f0_floor=cfg['f0_min'],
-        f0_ceil=cfg['f0_max'],
-        frame_period=frame_period,
-    )
+    f0_extractor = cfg.get('f0_extractor', 'harvest')
+
+    if f0_extractor == 'rmvpe':
+        import sys as _sys
+        _project_root = cfg.get('_project_root', '.')
+        if _project_root not in _sys.path:
+            _sys.path.insert(0, _project_root)
+        from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm
+        _abs_max = np.abs(y).max()
+        y_norm = (y / _abs_max if _abs_max > 1e-6 else y).astype(np.float32)
+        y_norm = np.clip(y_norm, -1.0, 1.0)
+        algo = RMVPEPitchAlgorithm(
+            sample_rate=sr,
+            hop_size=cfg['hop_size'],
+            fmin=cfg['f0_min'],
+            fmax=cfg['f0_max'],
+            device=cfg.get('rmvpe_device', 'cpu'),
+        )
+        f0_raw, voiced_flag, _ = algo.extract_pitch(y_norm)
+        f0_raw[~voiced_flag] = 0.0  # unvoiced frames → 0 before interpolation
+        f0_raw = _interpolate_f0(f0_raw)
+    else:
+        if not _PYWORLD_AVAILABLE:
+            return "error:pyworld not installed. Use f0_extractor: rmvpe or install pyworld."
+        frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
+        f0_raw, _ = pw.harvest(
+            y.astype(np.float64), sr,
+            f0_floor=cfg['f0_min'],
+            f0_ceil=cfg['f0_max'],
+            frame_period=frame_period,
+        )
 
     S = librosa.feature.melspectrogram(
         y=y,
@@ -183,6 +222,13 @@ def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict, num_workers: i
     if not wav_paths:
         print("Warning: No WAV files found in the input directory.")
         return
+
+    cfg = dict(cfg)
+    cfg['_project_root'] = str(Path(__file__).resolve().parent)
+
+    if cfg.get('f0_extractor') == 'rmvpe' and num_workers > 1:
+        print(f"  Note: RMVPE loads a neural model per worker. Forcing num_workers=1.")
+        num_workers = 1
 
     n_ok = n_skip = n_err = 0
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -387,6 +433,20 @@ def main():
     f0_img_dir = Path(p_cfg['f0_img_dir'])
     train_dir = Path(cfg['training']['train_dir'])
     test_dir  = Path(cfg['training']['test_dir'])
+
+    # RMVPE availability check — fail fast before any processing starts
+    if p_cfg.get('f0_extractor') == 'rmvpe' and args.step in ["all", "npz"]:
+        project_root = str(Path(__file__).resolve().parent)
+        import sys as _sys
+        if project_root not in _sys.path:
+            _sys.path.insert(0, project_root)
+        try:
+            from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm  # noqa: F401
+            print("✅ RMVPE: import OK")
+        except Exception as e:
+            print(f"❌ f0_extractor='rmvpe' が指定されていますが、RMVPEをインポートできません: {e}")
+            print("   tools/f0/algorithms/rmvpe.py が存在するか確認してください。")
+            return
 
     if args.step in ["all", "resample"]:
         step_resample_wavs(raw_wav_dir, resample_wav_dir, p_cfg['sample_rate'], p_cfg['prefix'])

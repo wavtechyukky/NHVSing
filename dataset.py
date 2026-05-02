@@ -11,15 +11,36 @@ class VocoderDataset(Dataset):
 
     Args:
         dataset_dir (str or Path): Root directory containing the .npz files.
+        augment (bool): If True, apply random amplitude augmentation (training only).
+        amp_aug_range (tuple): (min, max) linear amplitude scale. Default (0.5, 2.0).
     """
-    def __init__(self, dataset_dir: str, hop_size: int):
+    def __init__(self, dataset_dir: str, hop_size: int, validate: bool = False,
+                 augment: bool = False, amp_aug_range: tuple = (0.5, 2.0)):
         self.dataset_path = Path(dataset_dir)
         self.hop_size = hop_size
+        self.augment = augment
+        self.amp_aug_log_min = np.log(amp_aug_range[0])
+        self.amp_aug_log_max = np.log(amp_aug_range[1])
         # .rglob("*.npz") を使ってサブディレクトリ内も再帰的に検索
         self.file_paths = sorted(list(self.dataset_path.rglob("*.npz")))
-        
+
         if not self.file_paths:
             print(f"警告: '{dataset_dir}' 内に .npz ファイルが見つかりませんでした。")
+        elif validate:
+            # 壊れた NPZ を事前に除外（Drive 読み込み時は遅いので validate=True のときのみ）
+            valid = []
+            n_bad = 0
+            for p in self.file_paths:
+                try:
+                    with np.load(p) as f:
+                        _ = f['log_melspc'].shape[0]
+                    valid.append(p)
+                except Exception as e:
+                    print(f"  [skip] 壊れたファイルをスキップ: {p.name} ({e})")
+                    n_bad += 1
+            self.file_paths = valid
+            print(f"Found {len(self.file_paths)} valid files in {dataset_dir}"
+                  + (f" ({n_bad} corrupted skipped)" if n_bad else ""))
         else:
             print(f"Found {len(self.file_paths)} files in {dataset_dir}")
 
@@ -44,9 +65,20 @@ class VocoderDataset(Dataset):
         elif len(wav) < expected_wav_len:
             wav = np.pad(wav, (0, expected_wav_len - len(wav)))
 
+        if self.augment:
+            max_abs = np.abs(wav).max()
+            if max_abs > 1e-6:
+                # ピーク振幅が 0.99 を超えないよう alpha の上限をキャップ
+                log_alpha_max = min(self.amp_aug_log_max, np.log(0.99 / max_abs))
+                log_alpha_max = max(log_alpha_max, self.amp_aug_log_min)
+                alpha = np.exp(np.random.uniform(self.amp_aug_log_min, log_alpha_max))
+                wav = wav * alpha
+                # log_melspc は power_to_db (10*log10(power)) なので +20*log10(alpha) で補正
+                log_melspc = log_melspc + 20.0 * np.log10(alpha)
+
         f0, uv = norm_interp_f0(f0)
-        
-        return f0[np.newaxis].astype('float32'), log_melspc, wav.astype('float32'), uv[np.newaxis]
+
+        return f0[np.newaxis].astype('float32'), log_melspc.astype('float32'), wav.astype('float32'), uv[np.newaxis]
     
 
 # https://github.com/MoonInTheRiver/DiffSinger/blob/master/utils/pitch_utils.py

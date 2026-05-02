@@ -8,11 +8,24 @@ import torch
 import numpy as np
 import soundfile as sf
 import librosa
-import pyworld as pw
 import onnxruntime as ort
 
 from dataset import norm_interp_f0
-from model import NHVSing, repeat_interpolate
+from model import NHVSing, NHVSingV2, repeat_interpolate
+
+
+def _active_rms(y: np.ndarray, silence_thresh_db: float = -40.0) -> float:
+    """RMS computed from active (non-silent) samples only.
+
+    Samples whose amplitude is below silence_thresh_db are excluded so that
+    long silent passages do not drag down the RMS and cause over-amplification.
+    Falls back to full-signal RMS when fewer than 1 % of samples are active.
+    """
+    thresh = 10.0 ** (silence_thresh_db / 20.0)
+    active = y[np.abs(y) > thresh]
+    if len(active) < max(1, int(len(y) * 0.01)):
+        return float(np.sqrt(np.mean(y ** 2)))
+    return float(np.sqrt(np.mean(active ** 2)))
 
 
 # --- Utility Functions ---
@@ -29,9 +42,11 @@ def load_model(snapshot_path: str, config_path: str, device):
     cfg = load_config(config_path)
     print(f"✅ Configuration file loaded: '{config_path}'")
 
-    model = NHVSing(
+    ltv_filter_cfg = cfg['model']['ltv_filter']
+    ModelClass = NHVSingV2 if ltv_filter_cfg.get('use_shared_trunk', False) else NHVSing
+    model = ModelClass(
         vocoder_cfg=cfg['model']['vocoder'],
-        ltv_filter_cfg=cfg['model']['ltv_filter'],
+        ltv_filter_cfg=ltv_filter_cfg,
     )
 
     snapshot = torch.load(snapshot_path, map_location=device)
@@ -55,28 +70,59 @@ def load_model(snapshot_path: str, config_path: str, device):
 
 
 def extract_features_from_wav(wav_path: Path, cfg: dict):
-    """Extracts F0 and log mel-spectrogram from a WAV file using pyworld harvest."""
+    """Extracts F0 and log mel-spectrogram from a WAV file.
+
+    F0 extractor is selected from config:
+      harvest — pyworld harvest (V1 default)
+      rmvpe   — neural F0 estimator (V2, auto-downloaded on first run)
+    """
     print(f"--- Extracting features from WAV ---")
     p_cfg = cfg['preprocess']
     sr = p_cfg['sample_rate']
+    f0_extractor = p_cfg.get('f0_extractor', 'harvest')
 
     y, read_sr = sf.read(wav_path)
     if y.ndim == 2:
         y = y.mean(axis=1)
     assert read_sr == sr, f"Sample rate mismatch: {read_sr} vs {sr}"
 
-    y = y.astype(np.float64)
+    # RMS normalization (required for models trained on M4Singer)
+    target_rms = p_cfg.get('target_rms', None)
+    if target_rms:
+        rms = _active_rms(y.astype(np.float32))
+        if rms > 1e-6:
+            y = y * (target_rms / rms)
+        y = np.clip(y, -1.0, 1.0)
+        print(f"  RMS normalized to {target_rms} (active RMS was {rms:.4f})")
 
-    # F0 estimation (pyworld harvest)
-    frame_period = p_cfg['hop_size'] / sr * 1000
-    f0_raw, _ = pw.harvest(
-        y, sr,
-        f0_floor=p_cfg['f0_min'],
-        f0_ceil=p_cfg['f0_max'],
-        frame_period=frame_period,
-    )
+    # F0 extraction
+    if f0_extractor == 'rmvpe':
+        from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm
+        y_norm = y.astype(np.float32)
+        abs_max = np.abs(y_norm).max()
+        if abs_max > 1e-6:
+            y_norm = y_norm / abs_max
+        y_norm = np.clip(y_norm, -1.0, 1.0)
+        algo = RMVPEPitchAlgorithm(
+            sample_rate=sr,
+            hop_size=p_cfg['hop_size'],
+            fmin=p_cfg['f0_min'],
+            fmax=p_cfg['f0_max'],
+            device='cpu',
+        )
+        f0_raw, voiced_flag, *_ = algo.extract_pitch(y_norm)
+        f0_raw[~voiced_flag] = 0.0  # unvoiced frames → 0 before interpolation
+    else:
+        import pyworld as pw
+        frame_period = p_cfg['hop_size'] / sr * 1000
+        f0_raw, _ = pw.harvest(
+            y.astype(np.float64), sr,
+            f0_floor=p_cfg['f0_min'],
+            f0_ceil=p_cfg['f0_max'],
+            frame_period=frame_period,
+        )
 
-    # Log mel-spectrogram (librosa power_to_db, absolute scale)
+    # Log mel-spectrogram
     S = librosa.feature.melspectrogram(
         y=y.astype(np.float32), sr=sr,
         n_fft=p_cfg['fft_size'], hop_length=p_cfg['hop_size'],
@@ -91,7 +137,7 @@ def extract_features_from_wav(wav_path: Path, cfg: dict):
     f0_raw = f0_raw[:min_len]
     log_melspc = log_melspc[:min_len]
 
-    print(f"✅ Feature extraction complete. Number of frames: {min_len}")
+    print(f"✅ Feature extraction complete ({f0_extractor}). Frames: {min_len}")
     return torch.from_numpy(f0_raw).float(), torch.from_numpy(log_melspc).float()
 
 

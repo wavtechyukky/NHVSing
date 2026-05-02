@@ -17,7 +17,7 @@ preprocess:
   scale: 1.0
   f0_min: 150.0
   f0_max: 800.0
-  f0_extractor: 'harvest'  # harvest | refinegan | pyin | swiftf0
+  f0_extractor: 'harvest'  # harvest | rmvpe
   frame_size: 256
 
   # 無音カット設定（cut_by_phrases アルゴリズム）

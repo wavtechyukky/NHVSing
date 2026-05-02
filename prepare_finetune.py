@@ -27,7 +27,7 @@ import torch
 import yaml
 
 from discriminator import DiscriminatorWithComplexSTFT
-from model import NHVSing
+from model import NHVSing, NHVSingV2
 
 
 def load_config(path: str) -> dict:
@@ -48,9 +48,12 @@ def main():
     cfg = load_config(args.config)
 
     # --- Build model from target config ---
-    model = NHVSing(
+    ltv_filter_cfg = cfg['model']['ltv_filter']
+    ModelClass = NHVSingV2 if ltv_filter_cfg.get('use_shared_trunk', False) else NHVSing
+    print(f"Model: {ModelClass.__name__}")
+    model = ModelClass(
         vocoder_cfg=cfg['model']['vocoder'],
-        ltv_filter_cfg=cfg['model']['ltv_filter'],
+        ltv_filter_cfg=ltv_filter_cfg,
     )
 
     # --- Load source weights (snapshot or raw state_dict) ---
