@@ -21,16 +21,27 @@ class LTVFirONNX(nn.Module):
     def __init__(self, frame_size: int, filter_size: int = 0):
         super().__init__()
         self.frame_size = frame_size
-        # Pre-compute optimal FFT size for the given frame_size + filter_size
+        # Pre-compute the FFT length for frame_size + filter_size.
+        # ONNX Runtime's DFT op is fast ONLY for powers of two (a non-pow2 length such as
+        # 1280 is ~4-8x slower in ORT than 2048). We therefore pad to the next power of two:
+        # slightly more samples, but ~2x faster end-to-end in ORT, and bit-exact (FFT is FFT).
         if filter_size > 0:
             L_min = frame_size + filter_size - 1
-            self._fast_fft_len = self._next_fast_len(L_min)
+            self._fast_fft_len = self._next_pow2(L_min)
         else:
             self._fast_fft_len = 0
 
     @staticmethod
+    def _next_pow2(n: int) -> int:
+        """Next power of two >= n (ORT DFT is fast only for powers of two)."""
+        p = 1
+        while p < n:
+            p *= 2
+        return p
+
+    @staticmethod
     def _next_fast_len(n: int) -> int:
-        """Find the next FFT-efficient size >= n (factors of 2, 3, 5 only)."""
+        """Next 2/3/5-smooth size >= n (kept for reference; ORT prefers _next_pow2)."""
         while True:
             m = n
             while m % 2 == 0:

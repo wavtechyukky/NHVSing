@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHVSing V3 Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #f8f9fa; color: #212529; line-height: 1.6; }
+    header { background: #1a1a2e; color: #fff; padding: 48px 24px 40px; text-align: center; }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+    header p  { font-size: 1rem; color: #adb5bd; max-width: 820px; margin: 0 auto 8px; }
+    header a  { color: #74c0fc; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    main { max-width: 1400px; margin: 0 auto; padding: 40px 20px 80px; }
+    .intro { background: #fff; border-left: 4px solid #4dabf7; border-radius: 0 8px 8px 0;
+             padding: 18px 22px; margin-bottom: 48px; font-size: 0.95rem; color: #343a40;
+             box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    .intro code { background: #f1f3f5; padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+    section { margin-bottom: 56px; }
+    h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; padding-bottom: 8px;
+         border-bottom: 2px solid #dee2e6; }
+    .section-note { font-size: 0.88rem; color: #6c757d; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px;
+            overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 8px; }
+    th { background: #343a40; color: #fff; font-size: 0.82rem; font-weight: 600;
+         text-transform: uppercase; letter-spacing: 0.05em; padding: 12px 16px; text-align: center; }
+    th:first-child { text-align: left; }
+    td { padding: 12px 14px; border-bottom: 1px solid #f1f3f5; vertical-align: top; text-align: center; }
+    td:first-child { text-align: left; font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem;
+                     color: #495057; word-break: break-all; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    audio { width: 100%; min-width: 150px; max-width: 360px; height: 34px; }
+    td img { display: block; width: 100%; max-width: 400px; border-radius: 4px; margin-top: 6px; }
+    .m { display: inline-block; font-size: 0.8rem; color: #6c757d; margin-top: 4px; }
+    footer { text-align: center; font-size: 0.82rem; color: #adb5bd; padding: 32px 20px;
+             border-top: 1px solid #dee2e6; }
+    footer a { color: #adb5bd; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>NHVSing V3 Demo</h1>
+  <p>A lightweight Neural Homomorphic Vocoder for singing, compared against NSF-HiFiGAN (the current SOTA neural vocoder).</p>
+  <p>
+    <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub Repository</a>
+    &nbsp;·&nbsp;
+    <a href="https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf" target="_blank">Original Paper (Liu et al., 2020)</a>
+    &nbsp;·&nbsp;
+    <a href="v2.html">← NHVSingV2 Demo</a>
+  </p>
+</header>
+
+<main>
+
+  <div class="intro">This page mainly studies NHVSing V3 in comparison with <b>NSF-HiFiGAN</b> (OpenVPI), the vocoder generally considered the current state of the art for singing. "NSF-HiFiGAN" here is <b>pc-nsf-hifigan</b> (<code>pc_nsf_hifigan_44.1k_hop512_128bin</code>) in the copy-synthesis section (Part A), and the OpenVPI <b>nsf_hifigan</b> build (from OpenUtau's <code>nsf_hifigan</code> dependency) in the synthesis section (Part B). In mel reproduction the two look comparable, but <b>numerically NSF-HiFiGAN is slightly ahead, and perceptually its reproduction fidelity is also a little higher</b>. Also, by design NHV emits a single periodic waveform per analysis frame, so it <b>cannot reproduce acoustic features shorter than one frame</b>; consequently lip noise and other sub-frame transients are rendered somewhat indistinctly. NHVSing V3&#39;s appeal is efficiency &mdash; comparable quality at a fraction of the model size and compute (~2&nbsp;MB ONNX, no quantization).</div>
+
+  <section>
+    <h2>Efficiency &mdash; RTF and model size</h2>
+    <p class="section-note">RTF (real-time factor) = seconds of CPU compute per second of 44.1&nbsp;kHz audio; lower is faster, and &lt;1 means faster than real time. Both vocoders run as single-batch CPU inference (ONNX Runtime). <b>Model size: NHVSing V3 = 2.2&nbsp;MB ONNX (no quantization) vs NSF-HiFiGAN = 56.7&nbsp;MB &mdash; about 26&times; smaller.</b> Measured on an Apple 10-core CPU, ~5&nbsp;s clip, median of 9 runs.</p>
+    <table><tr><th>CPU threads</th><th>NHVSing V3 (ONNX)</th><th>NSF-HiFiGAN (ONNX)</th><th>NHVSing speed-up</th></tr><tr><td>1</td><td>0.076 (13×)</td><td>0.604 (2×)</td><td>8.0×</td></tr><tr><td>2</td><td>0.065 (15×)</td><td>0.316 (3×)</td><td>4.9×</td></tr><tr><td>4</td><td>0.062 (16×)</td><td>0.201 (5×)</td><td>3.3×</td></tr><tr><td>8</td><td>0.063 (16×)</td><td>0.198 (5×)</td><td>3.1×</td></tr></table>
+    <p class="section-note">NHVSing’s per-frame impulse-response filtering is <b>embarrassingly parallel</b>, but ONNX Runtime barely exploits it, so NHVSing V3 is essentially single-core-bound there (13&times; &rarr; 16&times; real time), whereas NSF-HiFiGAN’s large convolutions parallelize well (2&times; &rarr; 5&times;). Hence NHVSing’s speed lead is largest on low-core devices (~8&times;) and narrows to ~3&times; on many cores, but it stays ahead throughout. Native <b>PyTorch</b> does parallelize NHVSing as the algorithm allows (12&times; &rarr; 32&times; real time), and on multiple cores it even beats its own ONNX export:</p>
+    <table><tr><th>CPU threads</th><th>NHVSing V3 &mdash; ONNX Runtime</th><th>NHVSing V3 &mdash; PyTorch</th></tr><tr><td>1</td><td>0.076 (13×)</td><td>0.082 (12×)</td></tr><tr><td>2</td><td>0.065 (15×)</td><td>0.050 (20×)</td></tr><tr><td>4</td><td>0.062 (16×)</td><td>0.043 (23×)</td></tr><tr><td>8</td><td>0.063 (16×)</td><td>0.031 (32×)</td></tr></table>
+  </section>
+
+  <section>
+    <h2>Part A — Copy-synthesis (NHVSing V3 / V3X vs pc-nsf-hifigan, ep1250)</h2>
+    <p class="section-note">One <b>validation clip that is not included in the training data</b>, taken from each dataset, re-synthesized by GT / NHVSing V3 / NHVSing V3X / NSF-HiFiGAN. <b>V3X receives the mel sub-sampled to the hop-512 grid</b> (the grid OpenUtau / DiffSinger produce) <b>and upsamples it back internally</b>, so comparing V3 with V3X isolates the cost of that hop-512&rarr;256 interpolation. Each cell shows the audio, its mel-spectrogram, and mel-L1 (L1 against the original mel; lower = closer). mel-L1 does not match perception, so judge by listening.</p>
+    <table><tr><th>segment</th><th>Ground Truth</th><th>NHVSing V3</th><th>NHVSing V3X</th><th>NSF-HiFiGAN</th></tr>
+<tr><td>1st_color_0000</td><td><audio controls preload="none" src="audio_v3/1st_color_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/1st_color_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/1st_color_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/1st_color_0000_v3_mel.png"><br><span class="m">mel-L1 0.270</span></td><td><audio controls preload="none" src="audio_v3/1st_color_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/1st_color_0000_v3x_mel.png"><br><span class="m">mel-L1 0.272</span></td><td><audio controls preload="none" src="audio_v3/1st_color_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/1st_color_0000_nsf_mel.png"><br><span class="m">mel-L1 0.278</span></td></tr>
+<tr><td>20186_0000</td><td><audio controls preload="none" src="audio_v3/20186_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/20186_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/20186_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/20186_0000_v3_mel.png"><br><span class="m">mel-L1 0.311</span></td><td><audio controls preload="none" src="audio_v3/20186_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/20186_0000_v3x_mel.png"><br><span class="m">mel-L1 0.320</span></td><td><audio controls preload="none" src="audio_v3/20186_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/20186_0000_nsf_mel.png"><br><span class="m">mel-L1 0.244</span></td></tr>
+<tr><td>CSD_en014b_0002</td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_gt.wav"></audio><br><img class="mel" src="audio_v3/CSD_en014b_0002_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_v3.wav"></audio><br><img class="mel" src="audio_v3/CSD_en014b_0002_v3_mel.png"><br><span class="m">mel-L1 0.297</span></td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_v3x.wav"></audio><br><img class="mel" src="audio_v3/CSD_en014b_0002_v3x_mel.png"><br><span class="m">mel-L1 0.295</span></td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_nsf.wav"></audio><br><img class="mel" src="audio_v3/CSD_en014b_0002_nsf_mel.png"><br><span class="m">mel-L1 0.237</span></td></tr>
+<tr><td>NUS48E_sing_JTAN_15_0005</td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_gt.wav"></audio><br><img class="mel" src="audio_v3/NUS48E_sing_JTAN_15_0005_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_v3.wav"></audio><br><img class="mel" src="audio_v3/NUS48E_sing_JTAN_15_0005_v3_mel.png"><br><span class="m">mel-L1 0.283</span></td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_v3x.wav"></audio><br><img class="mel" src="audio_v3/NUS48E_sing_JTAN_15_0005_v3x_mel.png"><br><span class="m">mel-L1 0.281</span></td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_nsf.wav"></audio><br><img class="mel" src="audio_v3/NUS48E_sing_JTAN_15_0005_nsf_mel.png"><br><span class="m">mel-L1 0.223</span></td></tr>
+<tr><td>Natsume_Singing_DB_0713_12_0006</td><td><span class="m">Ground truth withheld — redistributing this original recording requires the singer's permission.</span></td><td><audio controls preload="none" src="audio_v3/Natsume_Singing_DB_0713_12_0006_v3.wav"></audio><br><img class="mel" src="audio_v3/Natsume_Singing_DB_0713_12_0006_v3_mel.png"><br><span class="m">mel-L1 0.328</span></td><td><audio controls preload="none" src="audio_v3/Natsume_Singing_DB_0713_12_0006_v3x.wav"></audio><br><img class="mel" src="audio_v3/Natsume_Singing_DB_0713_12_0006_v3x_mel.png"><br><span class="m">mel-L1 0.324</span></td><td><audio controls preload="none" src="audio_v3/Natsume_Singing_DB_0713_12_0006_nsf.wav"></audio><br><img class="mel" src="audio_v3/Natsume_Singing_DB_0713_12_0006_nsf_mel.png"><br><span class="m">mel-L1 0.238</span></td></tr>
+<tr><td>ONIKU_KURUMI_UTAGOE_DB_hato_0000</td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v3_mel.png"><br><span class="m">mel-L1 0.372</span></td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v3x_mel.png"><br><span class="m">mel-L1 0.360</span></td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_nsf_mel.png"><br><span class="m">mel-L1 0.267</span></td></tr>
+<tr><td>VocalSet_f8_long_trill_o_0000</td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/VocalSet_f8_long_trill_o_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/VocalSet_f8_long_trill_o_0000_v3_mel.png"><br><span class="m">mel-L1 0.290</span></td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/VocalSet_f8_long_trill_o_0000_v3x_mel.png"><br><span class="m">mel-L1 0.288</span></td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/VocalSet_f8_long_trill_o_0000_nsf_mel.png"><br><span class="m">mel-L1 0.260</span></td></tr>
+<tr><td>acapella_song2_s02_0024_0000</td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/acapella_song2_s02_0024_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/acapella_song2_s02_0024_0000_v3_mel.png"><br><span class="m">mel-L1 0.320</span></td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/acapella_song2_s02_0024_0000_v3x_mel.png"><br><span class="m">mel-L1 0.323</span></td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/acapella_song2_s02_0024_0000_nsf_mel.png"><br><span class="m">mel-L1 0.258</span></td></tr>
+<tr><td>kiritan_singing_09_0006</td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_gt.wav"></audio><br><img class="mel" src="audio_v3/kiritan_singing_09_0006_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_v3.wav"></audio><br><img class="mel" src="audio_v3/kiritan_singing_09_0006_v3_mel.png"><br><span class="m">mel-L1 0.340</span></td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_v3x.wav"></audio><br><img class="mel" src="audio_v3/kiritan_singing_09_0006_v3x_mel.png"><br><span class="m">mel-L1 0.345</span></td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_nsf.wav"></audio><br><img class="mel" src="audio_v3/kiritan_singing_09_0006_nsf_mel.png"><br><span class="m">mel-L1 0.263</span></td></tr>
+<tr><td>segments_2009000333_0000</td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_gt.wav"></audio><br><img class="mel" src="audio_v3/segments_2009000333_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_v3.wav"></audio><br><img class="mel" src="audio_v3/segments_2009000333_0000_v3_mel.png"><br><span class="m">mel-L1 0.312</span></td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_v3x.wav"></audio><br><img class="mel" src="audio_v3/segments_2009000333_0000_v3x_mel.png"><br><span class="m">mel-L1 0.311</span></td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3/segments_2009000333_0000_nsf_mel.png"><br><span class="m">mel-L1 0.248</span></td></tr>
+<tr><td>wav_O_re_04_0003</td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_gt.wav"></audio><br><img class="mel" src="audio_v3/wav_O_re_04_0003_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_v3.wav"></audio><br><img class="mel" src="audio_v3/wav_O_re_04_0003_v3_mel.png"><br><span class="m">mel-L1 0.403</span></td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_v3x.wav"></audio><br><img class="mel" src="audio_v3/wav_O_re_04_0003_v3x_mel.png"><br><span class="m">mel-L1 0.390</span></td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_nsf.wav"></audio><br><img class="mel" src="audio_v3/wav_O_re_04_0003_nsf_mel.png"><br><span class="m">mel-L1 0.286</span></td></tr>
+</table>
+  </section>
+
+  <section>
+    <h2>Part B — Singing synthesis (DiffSinger acoustic mel)</h2>
+    <p class="section-note">Using the DiffSinger acoustic voicebanks of <b>Namine Ritsu</b> and <b>Natsume Yuri</b> (transposed −3 semitones), we synthesized <i>Aka-tombo (Red Dragonfly)</i> and <i>Twinkle Twinkle Little Star</i> (each split into two halves). This demonstrates <b>swapping OpenUtau's default DiffSinger vocoder (nsf_hifigan) out for NHVSing</b>: the same predicted (generated) acoustic mel is re-synthesized by NSF-HiFiGAN and NHVSing V3X@1250. Each spectrogram has three panes — <b>predicted mel / NSF-HiFiGAN output mel / NHVSing output mel</b>. Pure synthesis has no ground truth, so mel-L1 is the fidelity of reconstructing the input mel (reference only).</p>
+    <table><tr><th>Singer / Song</th><th>NSF-HiFiGAN</th><th>NHVSing V3X@1250</th><th>mel-L1<br>(NSF / V3X)</th></tr>
+<tr><td>Namine Ritsu<br>Aka-tombo — part 1<br>T=731<br><img src="audio_v3/synth/ritsu_akatonbo_zen_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_akatonbo_zen_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_akatonbo_zen_v3x.wav"></audio></td><td>0.449 / 0.440</td></tr>
+<tr><td>Namine Ritsu<br>Aka-tombo — part 2<br>T=727<br><img src="audio_v3/synth/ritsu_akatonbo_kou_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_akatonbo_kou_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_akatonbo_kou_v3x.wav"></audio></td><td>0.440 / 0.466</td></tr>
+<tr><td>Namine Ritsu<br>Twinkle Twinkle — part 1<br>T=710<br><img src="audio_v3/synth/ritsu_kira_zen_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_kira_zen_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_kira_zen_v3x.wav"></audio></td><td>0.743 / 0.715</td></tr>
+<tr><td>Namine Ritsu<br>Twinkle Twinkle — part 2<br>T=709<br><img src="audio_v3/synth/ritsu_kira_kou_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_kira_kou_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/ritsu_kira_kou_v3x.wav"></audio></td><td>0.648 / 0.759</td></tr>
+<tr><td>Natsume Yuri<br>Aka-tombo — part 1<br>T=735<br><img src="audio_v3/synth/natsume_akatonbo_zen_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/natsume_akatonbo_zen_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/natsume_akatonbo_zen_v3x.wav"></audio></td><td>0.227 / 0.243</td></tr>
+<tr><td>Natsume Yuri<br>Aka-tombo — part 2<br>T=727<br><img src="audio_v3/synth/natsume_akatonbo_kou_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/natsume_akatonbo_kou_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/natsume_akatonbo_kou_v3x.wav"></audio></td><td>0.275 / 0.190</td></tr>
+<tr><td>Natsume Yuri<br>Twinkle Twinkle — part 1<br>T=718<br><img src="audio_v3/synth/natsume_kira_zen_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/natsume_kira_zen_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/natsume_kira_zen_v3x.wav"></audio></td><td>0.277 / 0.240</td></tr>
+<tr><td>Natsume Yuri<br>Twinkle Twinkle — part 2<br>T=713<br><img src="audio_v3/synth/natsume_kira_kou_spec.png"></td><td><audio controls preload="none" src="audio_v3/synth/natsume_kira_kou_nsf.wav"></audio></td><td><audio controls preload="none" src="audio_v3/synth/natsume_kira_kou_v3x.wav"></audio></td><td>0.312 / 0.223</td></tr>
+</table>
+  </section>
+
+</main>
+
+<footer>
+  NHVSing V3 &nbsp;·&nbsp; <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub</a>
+</footer>
+
+</body>
+</html>

@@ -6,9 +6,109 @@
 
 A [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf) model **tuned for singing voice synthesis**. Implemented in PyTorch with support for JIT compilation and single-file ONNX export.
 
-This repository contains two model classes: **NHVSing** (single-speaker model) and **NHVSingV2** (multi-speaker general-purpose model).
+This repository contains the latest **NHVSing V3 / V3X** (recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker).
 
 ***
+
+## NHVSing V3 / V3X (latest, recommended)
+
+**V3** is the latest model, refined for singing (44.1kHz / hop256 / 128-mel [40–16000Hz, **ln**]). Three essential improvements over V2:
+
+- **Multi-Resolution Discriminator (MRD)** (+ MPD): the single biggest factor in quality. UnivNet-style multi-resolution spectrogram-magnitude discrimination.
+- **Faster impulse-response synthesis (`fft_corr`)**: the LTV-FIR time-correlation is computed via FFT — bit-equivalent to the time-domain version, ~8× faster on CPU.
+- **Training-data curation & augmentation**: gathered high-quality 44.1 kHz audio and, during training, fed it while randomly varying volume and pitch. Although this feeds the model waveforms that deviate from ordinary ones, it significantly improved the vocoder's generalization.
+- **Cleaner excitation/conditioning**: many measures were tried to raise quality, but the two above had the largest effect, so the configuration was reverted to follow the original paper for now (a major restructuring would likely be V4 or later). White 200-harmonic source / quef_norm α=1.0 / **mel-only input** (F0 embedding removed) / linear F0 interpolation (a return to the original NHV).
+
+**V3X** lets V3 run on **hop512 input**: it takes the hop512 mel/F0 emitted by e.g. OpenUtau, interpolates internally to the hop256 grid, then runs V3 (weights/state_dict shared with V3). This **resolves the "hop512 severely degrades quality" limitation** of V1/V2.
+
+| Class | Purpose | config |
+|---|---|---|
+| `NHVSing` | V1 legacy (single-speaker) | `config.yaml` |
+| `NHVSingV2` | V2 legacy (multi-speaker) | `config_v2.yaml` |
+| **`NHVSingV3`** | **final model (hop256 native)** | **`config_v3.yaml`** |
+| **`NHVSingV3X`** | **hop512-input variant of V3** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
+
+### Performance (V3)
+
+**Model size**: `nhv_v3.onnx` is about **2.2 MB** (no quantization) — roughly **1/26** the size of NSF-HiFiGAN (pc-nsf-hifigan, 56.7 MB), the reference we compare against.
+
+**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an Apple 10-core CPU / ~5 s input / batch 1 / median of 9 runs.
+
+Under ONNX Runtime (CPU), side by side with NSF-HiFiGAN:
+
+| CPU threads | NHVSing V3 | NSF-HiFiGAN | NHVSing speed-up |
+|---|---|---|---|
+| 1 | 0.076 (13×) | 0.604 (2×) | **8.0×** |
+| 2 | 0.065 (15×) | 0.316 (3×) | 4.9× |
+| 4 | 0.062 (16×) | 0.201 (5×) | 3.3× |
+| 8 | 0.063 (16×) | 0.198 (5×) | 3.1× |
+
+**The two scale very differently with core count.** NHVSing V3's per-frame impulse-response generation is fully independent (*embarrassingly parallel*), but **ONNX Runtime barely exploits this**, so V3 is essentially single-core-bound (13×→16× and then flat). NSF-HiFiGAN's large transposed convolutions parallelize well, so it keeps speeding up with more cores (2×→5×). As a result, **NHVSing's speed lead is largest on low-core devices (~8×) and narrows to ~3× on many cores**, but it stays ahead throughout.
+
+**Native PyTorch does realize the parallelism.** Running the same V3 in torch scales with core count as the per-frame independence allows:
+
+| CPU threads | ONNX Runtime | PyTorch |
+|---|---|---|
+| 1 | 0.076 (13×) | 0.082 (12×) |
+| 2 | 0.065 (15×) | 0.050 (20×) |
+| 4 | 0.062 (16×) | 0.043 (23×) |
+| 8 | 0.063 (16×) | **0.031 (32×)** |
+
+On multiple cores, **torch actually beats our own ONNX export** (~2× at 8 threads): for such a tiny, FFT-dominated model, torch's batched-FFT parallelism helps more than ORT's graph optimizations. So "NHVSing is fast/slow" cannot be captured by a single number — it depends on the **runtime × core-count** combination.
+
+> RTF depends only on the amount of compute, not on the weight values (it is the same for any checkpoint).
+
+The ONNX graph pads the `LTVFirONNX` FFT length to a **power of two** for speed (ONNX Runtime's DFT is fast only for power-of-two sizes); V3X is comparable. The LTV-FIR time-correlation itself is also FFT-based via `fft_corr` (bit-equivalent to the time-domain version, ~8× faster on CPU — see "Key changes" above).
+
+### Usage (V3)
+
+**Preprocess** (F0 = RMVPE only + jump cleaning; `rmvpe.pt` auto-downloads on first run):
+```bash
+python preprocess.py --indir <dir_of_singing_wavs> --out <npz_dir> --config config_v3.yaml
+```
+
+> **Splitting train / test**: `preprocess.py` just writes all shards to `--out`; it does **not** auto-split into train/test. **Run it twice on separate wav sets** (train vs. eval) and point each to its own directory (a few held-out songs are enough for test):
+> ```bash
+> python preprocess.py --indir wavs/train --out dataset/train --config config_v3.yaml
+> python preprocess.py --indir wavs/eval  --out dataset/test  --config config_v3.yaml
+> ```
+> Set `training.train_dir` / `test_dir` in `config_v3.yaml` accordingly. `VocoderDataset` recursively reads both shard npz (`<sid>|f0` / `|log_melspc` / `|wav`) and single-segment npz, so either layout works.
+
+**Train** (MRD + MPD GAN; set `training.train_dir` / `test_dir` / `snapshot_dir` in `config_v3.yaml`):
+```bash
+python train_v3.py --config config_v3.yaml
+```
+
+**ONNX export** (both V3 and V3X; 3 outputs: `waveform` / `harmonic` / `noise`):
+```bash
+python export.py --config config_v3.yaml --ckpt <weights.ckpt> --out exported_models
+```
+By default this writes to `exported_models/v3/`:
+
+- **`nhv_v3.pth`** — shared weights for V3/V3X (load with `NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))`). **V3X shares these weights, so it has no `.pth`** (ONNX only).
+- **`nhv_v3.onnx` / `nhv_v3x.onnx`** — each a **single self-contained ONNX** (NN + DSP, weights embedded — no external `.onnx.data`; runnable with ONNX Runtime alone, same format as V1/V2's `full_vocoder.onnx`). Inputs `mel` / `f0` / `uv` → 3 outputs `waveform` / `harmonic` / `noise`, with `clamp(harmonic + noise) == waveform`. The time length T is dynamic (any length).
+
+**Inference (Python)**:
+```python
+from nhv_vocoder import NHVVocoder
+voc = NHVVocoder('weights.ckpt', 'config_v3.yaml')      # V3/V3X auto-selected via config use_v3x
+cf0, uv = NHVVocoder.prep_f0(f0_hz)                       # raw F0 (0=unvoiced) → continuous F0 + uv
+wav = voc.infer(mel, cf0, uv)                            # mel: [T, 128] ln-mel
+```
+
+### F0 extraction
+
+Preprocessing F0 uses **RMVPE only + jump-cleaning post-processing** (`tools/f0`). The RMVPE weights `rmvpe.pt` (~173MB) are **not** bundled — they **auto-download from HuggingFace on first run**.
+
+### Weight licensing
+
+Distributed trained weights are **non-commercial** (due to the training data). Check each dataset's license directly at its original source (listed under *Singing Voice Databases Used* below).
+
+***
+
+# Everything below is about the legacy versions (NHVSing V1 / NHVSingV2)
+
+> ⚠️ **The sections below (Audio Samples, Architecture, Performance, Usage, etc.) all describe the older V1 / V2 models.** For new work, use **V3 / V3X (recommended)** above. V1 / V2 are kept for compatibility.
 
 ## Audio Samples
 
@@ -35,7 +135,7 @@ NHVSing excels at faithfully reproducing the voice quality of a single speaker t
 
 ***
 
-## Performance
+## Performance (V1 / V2)
 
 Measured under the following environment and conditions.
 
@@ -60,9 +160,9 @@ Measured under the following environment and conditions.
 
 ***
 
-## Architecture
+## Architecture (V1 / V2)
 
-The following changes have been made from the original paper's implementation.
+The following changes have been made from the original paper's implementation. (V3's discriminator is MRD + MPD, which differs from the MSD + complex-STFT setup described below.)
 
 * **Sampling Rate**: Supports **44.1kHz**.
 * **Complex Cepstrum**: Dimensions expanded to **512**.
@@ -98,7 +198,7 @@ pip install -r requirements.txt
 
 ***
 
-## Usage
+## Usage (V1 / V2)
 
 ### NHVSing (V1)
 
@@ -226,7 +326,7 @@ This penalty suppresses harmonic components from leaking in unvoiced regions (fr
 ## Known Issues
 
 *   **Training Process:** Multi-GPU training is not supported.
-*   **Other Frame Sizes:** Quality degrades significantly with hop_size=512.
+*   **Frame size:** V1/V2 degrade significantly at hop_size=512. **V3X handles hop512 input** (interpolating internally to hop256), resolving this.
 *   **NHVSing (V1) Speaker Dependency:** The generated waveform strongly reflects the characteristics of the trained speaker. Use NHVSingV2 if multi-speaker support is required.
 
 ***
@@ -246,6 +346,23 @@ This repository is based on the following papers and repositories published by L
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
 
 ## Singing Voice Databases Used
+
+### V3 (distributed weights, non-commercial)
+
+The distributed V3 weights are trained on the following non-commercial data. **Please check each dataset's license and terms directly at its original source** (Kiritan / No.7 require SNS account authentication; Opencpop may require contacting the rights holder):
+
+*   Tohoku Kiritan — [Zunko Project](https://zunko.jp/kiridev/login.php)
+*   Natsume Yuri — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
+*   Namine Ritsu (Ritsu Singing DB Ver2.0-2.2 / Soft) — [Canon Voice](https://www.canon-voice.com/voicebanks/)
+*   Children's Song Dataset (CSD) — [Zenodo](https://zenodo.org/records/4916302)
+*   NUS-48E — [Zenodo](https://zenodo.org/records/19595152)
+*   ONIKU_KURUMI Utagoe DB — [Onikuru](https://onikuru.info/db-download/)
+*   Opencpop — [WeNet Opencpop](https://wenet-e2e.github.io/opencpop/download/)
+*   No.7 — [VOICE SEVEN](https://voiceseven.com/7dev/login.php)
+*   VocalSet — [Zenodo](https://zenodo.org/records/1193957)
+*   ccmusic-database / acapella — [HuggingFace](https://huggingface.co/datasets/ccmusic-database/acapella)
+
+### V1 / V2 (legacy)
 
 *   Tohoku Kiritan — [Zunko Project](https://zunko.jp/kiridev/login.php)
 *   Natsume Yuri — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)

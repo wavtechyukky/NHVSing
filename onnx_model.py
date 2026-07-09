@@ -96,8 +96,8 @@ class NHVConvsShared(nn.Module):
 
         self.head_harm  = nn.Linear(conv_channels, ccep_size_harm)
         self.head_noise = nn.Linear(conv_channels, ccep_size_noise)
-        nn.init.zeros_(self.head_harm.weight);  nn.init.zeros_(self.head_harm.bias)
-        nn.init.zeros_(self.head_noise.weight); nn.init.zeros_(self.head_noise.bias)
+        nn.init.xavier_uniform_(self.head_harm.weight);  nn.init.zeros_(self.head_harm.bias)
+        nn.init.xavier_uniform_(self.head_noise.weight); nn.init.zeros_(self.head_noise.bias)
 
     def forward(self, x: torch.Tensor):
         """x: (B, T, D) → ccep_harm, ccep_noise each (B, T, ccep_size)"""

@@ -1,0 +1,134 @@
+# config_v3.yaml — NHVSing V3 (44.1kHz / hop256 / 128-mel[40-16000, ln])
+#
+# 生成器 V3: mel のみ入力 / 白色 200 倍音励起 / quef_norm α=1.0 /
+#            uv hard gate(推論時の無声保護)/ f0_upsample linear / weight_norm。
+# hop512 入力(OpenUtau 等)で使う場合は ltv_filter.use_v3x: true(V3X: 内部で 256 補間)。
+# 学習: MRD + MPD GAN(train.py)。データ/出力ディレクトリはコマンドライン/環境で指定する。
+
+seed: 42
+device: "cuda"
+
+preprocess:
+  sample_rate: 44100
+  hop_size:    256
+  fft_size:    2048
+  win_size:    2048
+  mel_dim:     128
+  mel_min:     40.0
+  mel_max:     16000.0
+  mel_format:  'diffsinger'      # nvSTFT / pc-nsf 互換 ln-mel(center=False, reflect pad (fft-hop)//2)
+  target_rms:  0.111             # 学習データの RMS 正規化基準
+  # F0: 0=無声 で保存し、学習時に線形補間 + uv フラグ化(dataset.norm_interp_f0)
+  f0_extractor: 'rmvpe'
+  f0_min:      40.0
+  f0_max:      1200.0
+  cut_wavs:
+    silence_thresh:  -50.0
+    min_silence_dur: 0.10
+    max_dur:         30.0       # whole-utterance 寄り(長無音のみ除去)。長さは学習時 crop で管理
+    long_silence:    0.5        # 0.5s 以上の無音のみ切断点
+    pad:             0.10
+  data_filtering:
+    min_frames: 150
+    max_frames: 99999
+
+common_params: &common_params
+  hop_size:      256
+  in_channels:   128            # = mel_dim。mel conv の入力幅
+  conv_channels: 256
+  kernel_size:   3
+  dilation_size: 1
+  group_size:    8
+  use_causal:    false
+
+model:
+  vocoder:
+    <<: *common_params
+    sample_rate:     44100
+    noise_std:       0.03
+    use_weight_norm: true
+    f0_upsample:     linear     # 滑らかな瞬時周波数(倍音シャープ化)
+    n_harmonic:      200        # 白色 200 倍音(均等振幅、Nyquist soft mask)
+
+  ltv_filter:
+    <<: *common_params
+    ccep_size:       256
+    ccep_size_noise: 256        # harmonic と同型の複素ケプストラム(noise も ccep)
+    fft_size:        1024       # LTV ケプストラム→IR の FFT(mel fft とは独立、fft >= ccep)
+    n_ltv_layers:    2          # 原論文(Liu2020 NHV)準拠(ConvLayers = 入力射影 + 2隠れ + 出力射影)
+    use_quef_norm:   true
+    quef_norm_alpha: 1.0
+    use_shared_trunk: true      # V2/V3 共有トランク
+    use_hard_vuv:    true       # uv hard gate
+    use_v3:          true       # ← NHVSingV3(最終モデル)を選択。hop512 版は use_v3x: true
+
+discriminator:
+  use_hifigan_disc: true
+  discriminator_periods: [3, 5, 7, 11, 17, 23, 37]
+  use_msd: false                # MSD は使わない
+  use_mpd: true                 # MPD(周期/位相)
+  use_mrd: true                 # MRD(UnivNet 多解像度スペクトログラム magnitude)
+
+training:
+  # ── データ/出力(各自のパスに設定)──
+  train_dir: 'dataset/train'          # npz 学習データのディレクトリ
+  test_dir:  'dataset/test'
+  log_dir:      'logs_v3'
+  snapshot_dir: 'snapshots_v3'
+  inference_output_dir: 'dataset/inference'
+  snapshot_path: None                 # 再開する ckpt(None=新規学習)
+  max_samples_per_epoch: 999999       # 1エポックの最大 segment 数(全segで1パスにするなら実segment数)
+  gradient_accumulation_steps: 1
+  shuffle: true
+  save_interval: 10
+  nan_restart_until_epoch: 10
+  # ── disc(MRD)追加パラメータ ──
+  reinit_disc: false
+  r1_interval: 16                     # lazy R1(r1_gamma>0 のとき)
+  adaptive_d_gate: false
+  d_gate_floor: 0.35
+  d_gate_ema: 0.98
+  harmonic_penalty_scale: 0           # V3 は uv hard gate に置換済(未使用)
+  # ── pitch augmentation ──
+  pitch_aug: true
+  pitch_aug_prob: 1.0
+  pitch_aug_semitones: [-1.8, 1.8]
+  # ── TensorBoard 可視化 ──
+  tb_log_uvoff: true
+  tb_disc_badness: true
+  tb_linear_spec: true
+  # ── 最適化 ──
+  lr_g: 0.0004
+  lr_d: 0.0002
+  lr_d_grp2: 0.0002
+  disc_beta1: 0.5               # GAN 標準 β1=0.5(MRD が d=0.5 に固着する対策)
+  disc_beta2: 0.9
+  r1_gamma: 0                   # R1 オフ
+  disc_grad_clip: 5.0
+  disc_grad_clip_grp2: 5.0
+  gen_grad_clip: 200.0
+  crop_frames: 64               # 64*256 = 16384 samp ≈ 372ms のランダムクロップ
+  batch_size: 256
+  num_workers: 4
+  amp_augment: true
+  amp_aug_range: [0.1, 2.0]
+  vuv_dropout_prob: 1.0         # 学習中は uv gate を常時 OFF(mel から無声を自力抑制)。推論時のみ有効
+  adversarial_start: 50
+  adversarial_warmup_epochs: 10
+  # loss weights
+  mel_loss_scale: 45
+  stft_loss_scale: 2.5
+  stft_loss_type: 'nsf'
+  adversarial_scale: 1
+  feature_matching_scale: 2
+  grp2_loss_weight: 1.0
+  envelope_scale: 5
+  envelope_start: 150
+  envelope_kernel_size: 1024
+  envelope_stride: 128
+  envelope_directional: true
+  use_amp: true
+  amp_dtype: bfloat16
+  n_epoch: 1001
+  # multi-res STFT band(NSF 流 7 band)
+  window_lengths: [256, 512, 1024, 1536, 2048, 3072, 4096]

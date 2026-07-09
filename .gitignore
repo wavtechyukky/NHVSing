@@ -19,10 +19,18 @@ output*.wav
 # V2 exported models — track these explicitly (like exported_kiritan etc.)
 !exported_models/
 !exported_models/**
+# ...but NOT the third-party NSF-HiFiGAN (OpenVPI) used only for the demo's optional comparison
+exported_models/nsf_hifigan.onnx
 
 # Demo WAV outputs — track explicitly (reference audio for demo page)
 !wav/
 !wav/**
+
+# ...but withhold the Natsume Singing DB ground truth (Part A copy-synthesis):
+# redistributing the original recording requires the singer's permission (pending).
+# GT only — the V3 / V3X / NSF re-synthesis of it is still published.
+docs/audio_v3/Natsume_Singing_DB_0713_12_0006_gt.wav
+docs/audio_v3/Natsume_Singing_DB_0713_12_0006_gt_mel.png
 
 # Python
 __pycache__/
@@ -31,6 +39,7 @@ __pycache__/
 .ipynb_checkpoints/
 *.ipynb
 !demo_v2.ipynb
+!demo_v3.ipynb
 
 # macOS
 .DS_Store

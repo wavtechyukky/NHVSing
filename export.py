@@ -1,191 +1,179 @@
-import argparse
-import os
-import yaml
+"""NHVSing V3 / V3X の ONNX エクスポート + 検証 + RTF 計測。
+
+V3  … hop256 native。入力 mel[B,T,mel_dim] / f0[B,1,T] / uv[B,1,T]。
+V3X … hop512 入力を内部で hop256 へ整列補間してから V3。OpenUtau 等の hop512 mel をそのまま食う。
+
+ONNX グラフは dsp_rebuild の ONNX 互換部品(GenerateImpulseTrainONNX / ComplexCepstrumToImpONNX /
+LTVFirONNX)で組む。LTVFirONNX は FFT 長を 2 の冪へ pad 済み(ORT DFT が非冪で ~4-8x 遅い対策・bit 等価)。
+noise z は内部生成(RandomNormal)。uv は f0(=0 で無声)から導出すべきだが RTF 計測のため外部入力にしている。
+
+Usage:
+    python export.py --config config_v3.yaml --ckpt path/to/weights.ckpt --out exported_models
+"""
+import os, sys, time, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
 import torch
 import torch.nn as nn
-import onnx
+import yaml
 
-from model import NHVSingV2
+from model import NHVSingV3
 from onnx_model import NHVConvsShared
-from layers import F0Embedder
 from dsp_rebuild.impulse_train_onnx import GenerateImpulseTrainONNX
 from dsp_rebuild.complex_cepstrum_to_imp_onnx import ComplexCepstrumToImpONNX
 from dsp_rebuild.ltv_fir_onnx import LTVFirONNX
 
 
-def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+def _up_lin_t(x):
+    mid = 0.5 * (x[:, :-1] + x[:, 1:])
+    out = torch.stack([x[:, :-1], mid], dim=2).reshape(x.shape[0], -1, x.shape[2])
+    return torch.cat([out, x[:, -1:]], dim=1)
+
+def _up_lin_c(x):
+    mid = 0.5 * (x[..., :-1] + x[..., 1:])
+    out = torch.stack([x[..., :-1], mid], dim=-1).reshape(x.shape[0], x.shape[1], -1)
+    return torch.cat([out, x[..., -1:]], dim=-1)
+
+def _up_hold_c(x):
+    return torch.repeat_interleave(x, 2, dim=-1)
 
 
-def load_model(checkpoint_path, config):
-    model = NHVSingV2(
-        vocoder_cfg=config['model']['vocoder'],
-        ltv_filter_cfg=config['model']['ltv_filter'],
-    )
-    snapshot = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(snapshot['model'] if 'model' in snapshot else snapshot)
-    model.eval()
-    return model
-
-
-def export_pytorch_model(model, save_path):
-    print(f"Exporting PyTorch state_dict to {save_path}...")
-    torch.save(model.state_dict(), save_path)
-    print("Done.")
-
-
-def export_jit_model(model, save_path):
-    print(f"Exporting JIT model to {save_path}...")
-    scripted = torch.jit.script(model)
-    scripted.save(save_path)
-    print("Done.")
-
-
-# ---------------------------------------------------------------------------
-# Full unified ONNX model (NHVSingV2 — always shared trunk + F0 embedder)
-# ---------------------------------------------------------------------------
-
-class FullVocoderONNX(nn.Module):
-    """Unified ONNX-exportable vocoder for NHVSingV2.
-
-    Inputs:
-      log_melspc : (B, T, 128)         — log mel-spectrogram
-      f0         : (B, 1, T)           — continuous F0 in Hz (interpolated)
-      z          : (B, 1, T*hop_size)  — noise source
-
-    Output:
-      waveform   : (B, 1, T*hop_size)  — synthesized waveform in [-1, 1]
-    """
-
-    def __init__(self, vocoder_cfg: dict, ltv_filter_cfg: dict):
+class FullVocoderV3(nn.Module):
+    """V3 の全パイプラインを ONNX 互換部品で(hop256 native)。noise_on=False で harmonic のみ(決定的)。"""
+    def __init__(self, vocoder_cfg, ltv_filter_cfg, noise_on=True):
         super().__init__()
-        self.hop_size = vocoder_cfg['hop_size']
+        self.hop_size    = vocoder_cfg['hop_size']
+        self.noise_std   = float(vocoder_cfg.get('noise_std', 0.03))
+        self.noise_on    = noise_on
+        self.nn_core     = NHVConvsShared(dict(ltv_filter_cfg))
+        self.impulse_train = GenerateImpulseTrainONNX(int(vocoder_cfg.get('n_harmonic', 200)),
+                                                      vocoder_cfg['sample_rate'])
+        self.ccep_to_imp = ComplexCepstrumToImpONNX(ltv_filter_cfg['fft_size'], use_float64=False)
+        self.ltv_fir     = LTVFirONNX(self.hop_size, filter_size=ltv_filter_cfg['fft_size'])  # pow2 pad 済
 
-        self.nn_core = NHVConvsShared(dict(ltv_filter_cfg))
-        self.f0_embedder = F0Embedder(
-            n_bins    = ltv_filter_cfg.get('f0_embed_bins', 256),
-            embed_dim = ltv_filter_cfg.get('f0_embed_dim',  128),
-            f0_min    = ltv_filter_cfg.get('f0_embed_fmin', 40.0),
-            f0_max    = ltv_filter_cfg.get('f0_embed_fmax', 1200.0),
-        )
-        self.impulse_train = GenerateImpulseTrainONNX(200, vocoder_cfg['sample_rate'])
-        self.ccep_to_imp   = ComplexCepstrumToImpONNX(ltv_filter_cfg['fft_size'], use_float64=True)
-        self.ltv_fir       = LTVFirONNX(self.hop_size, filter_size=ltv_filter_cfg['fft_size'])
-
-    def forward(self, log_melspc: torch.Tensor, f0: torch.Tensor,
-                z: torch.Tensor) -> torch.Tensor:
-        f0_embed = self.f0_embedder(f0)                      # (B, T, embed_dim)
-        x = torch.cat([log_melspc, f0_embed], dim=-1)        # (B, T, mel+embed_dim)
-        ccep_harm, ccep_noise = self.nn_core(x)
-
-        cf0_resampled   = torch.repeat_interleave(f0, self.hop_size, dim=-1)
-        harmonic_source = self.impulse_train(cf0_resampled)
-
-        sig_harm  = self.ltv_fir(harmonic_source, self.ccep_to_imp(ccep_harm))
-        sig_noise = self.ltv_fir(z,               self.ccep_to_imp(ccep_noise))
-        return torch.clamp(sig_harm + sig_noise, -1.0, 1.0)
+    def forward(self, mel, f0, uv):
+        ccep_harm, ccep_noise = self.nn_core(mel)
+        cf0 = torch.nn.functional.interpolate(f0, scale_factor=self.hop_size,
+                                              mode='linear', align_corners=False)  # V3=linear
+        harmonic_source = self.impulse_train(cf0)
+        voiced = torch.repeat_interleave(1.0 - uv, self.hop_size, dim=-1)
+        harmonic_source = harmonic_source * voiced
+        sig_harm = self.ltv_fir(harmonic_source, self.ccep_to_imp(ccep_harm))
+        if self.noise_on:
+            z = torch.randn_like(harmonic_source) * self.noise_std
+            sig_noise = self.ltv_fir(z, self.ccep_to_imp(ccep_noise))
+        else:
+            sig_noise = torch.zeros_like(sig_harm)
+        waveform = torch.clamp(sig_harm + sig_noise, -1.0, 1.0)
+        # 3 出力: 合成波形 + harmonic / noise(生・pre-clamp)。消費側で成分ゲイン等に使える。
+        return waveform, sig_harm, sig_noise
 
 
-def export_full_onnx(model, config, save_path, opset=18):
-    print("Creating FullVocoderONNX model...")
-    full_model = FullVocoderONNX(
-        vocoder_cfg=config['model']['vocoder'],
-        ltv_filter_cfg=config['model']['ltv_filter'],
-    )
+class FullVocoderV3X(FullVocoderV3):
+    """hop512 入力 → 内部整列補間 → V3(ONNX 部品)。"""
+    def forward(self, mel512, f0_512, uv_512):
+        mel = _up_lin_t(mel512)
+        f0  = _up_lin_c(f0_512)
+        uv  = _up_hold_c(uv_512)[..., :f0.shape[-1]]
+        return super().forward(mel, f0, uv)
 
-    # Copy weights: NHVSingV2 uses self.convs (NHVConvsShared) and self.f0_embedder
-    src_sd = model.state_dict()
 
-    nn_core_sd = {k.replace('convs_onnx.', '', 1): v
-                  for k, v in src_sd.items() if k.startswith('convs_onnx.')}
-    full_model.nn_core.load_state_dict(nn_core_sd)
-    print(f"  Copied {len(nn_core_sd)} tensors into nn_core.")
+def load_core(full, ckpt_sd, vc, lc):
+    """ckpt(weight_norm 済)を V3 に load→除去→convs_onnx を full.nn_core へコピー。"""
+    v3 = NHVSingV3(vc, lc); v3.load_state_dict(ckpt_sd); v3.remove_weight_norm()
+    core = {k.replace('convs_onnx.', '', 1): v
+            for k, v in v3.state_dict().items() if k.startswith('convs_onnx.')}
+    m, u = full.nn_core.load_state_dict(core, strict=False)
+    return len(core), len(m), len(u)
 
-    f0_embed_sd = {k.replace('f0_embedder.', '', 1): v
-                   for k, v in src_sd.items() if k.startswith('f0_embedder.')}
-    full_model.f0_embedder.load_state_dict(f0_embed_sd)
-    print(f"  Copied {len(f0_embed_sd)} tensors into f0_embedder.")
 
-    full_model.eval()
+def _export(mod, inputs, path):
+    torch.onnx.export(mod, inputs, path, input_names=['mel', 'f0', 'uv'],
+                      output_names=['waveform', 'harmonic', 'noise'],
+                      dynamic_axes={'mel': {0: 'B', 1: 'T'}, 'f0': {0: 'B', 2: 'T'}, 'uv': {0: 'B', 2: 'T'},
+                                    'waveform': {0: 'B', 2: 'N'}, 'harmonic': {0: 'B', 2: 'N'},
+                                    'noise': {0: 'B', 2: 'N'}},
+                      opset_version=18, do_constant_folding=True)
+    # 新エクスポータは重みを path+'.data' に外部化することがある。V1/V2 の full_vocoder.onnx と同じ
+    # 「重み内蔵の単一ファイル」にするため、外部データを読み込んで埋め込み再保存し .data を削除。
+    import onnx
+    m = onnx.load(path, load_external_data=True)
+    onnx.save_model(m, path, save_as_external_data=False)
+    if os.path.exists(path + '.data'):
+        os.remove(path + '.data')
 
-    n_frames  = 100
-    mel_dim   = config['preprocess']['mel_dim']
-    hop_size  = config['model']['vocoder']['hop_size']
-    n_samples = n_frames * hop_size
 
-    dummy_mel = torch.randn(1, n_frames, mel_dim, dtype=torch.float32)
-    dummy_f0  = torch.randn(1, 1, n_frames, dtype=torch.float32).abs() * 300 + 100
-    dummy_z   = torch.randn(1, 1, n_samples, dtype=torch.float32) * 0.03
+def _rtf_ort(session, feeds, dur, n=7):
+    for _ in range(2): session.run(None, feeds)
+    ts = []
+    for _ in range(n):
+        t0 = time.perf_counter(); session.run(None, feeds); ts.append(time.perf_counter() - t0)
+    return float(np.median(ts)) / dur
 
-    print("Running test forward pass...")
+
+def _rtf_torch(mod, inputs, dur, n=7):
     with torch.no_grad():
-        y = full_model(dummy_mel, dummy_f0, dummy_z)
-    print(f"  Output shape: {y.shape}, range: [{y.min():.4f}, {y.max():.4f}]")
-
-    print(f"\nExporting to {save_path} (opset {opset})...")
-    torch.onnx.export(
-        full_model,
-        (dummy_mel, dummy_f0, dummy_z),
-        save_path,
-        input_names=['log_melspc', 'f0', 'z'],
-        output_names=['waveform'],
-        dynamic_axes={
-            'log_melspc': {0: 'batch', 1: 'n_frames'},
-            'f0':         {0: 'batch', 2: 'n_frames'},
-            'z':          {0: 'batch', 2: 'n_samples'},
-            'waveform':   {0: 'batch', 2: 'n_samples'},
-        },
-        opset_version=opset,
-        do_constant_folding=True,
-        verbose=False,
-    )
-
-    print("Merging into single .onnx file...")
-    model_proto = onnx.load(save_path)
-    onnx.save_model(model_proto, save_path, save_as_external_data=False)
-    data_file = save_path + ".data"
-    if os.path.exists(data_file):
-        os.remove(data_file)
-
-    print(f"  Exported: {save_path} ({os.path.getsize(save_path)/1024/1024:.1f} MB)")
-    print("Done.")
+        for _ in range(2): mod(*inputs)
+        ts = []
+        for _ in range(n):
+            t0 = time.perf_counter(); mod(*inputs); ts.append(time.perf_counter() - t0)
+    return float(np.median(ts)) / dur
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def export_variant(tag, FullCls, vc, lc, sd, T, out_dir):
+    import onnxruntime as ort
+    hop = vc['hop_size']
+    torch.manual_seed(0)
+    mel = torch.randn(1, T, vc['in_channels'])
+    f0  = torch.rand(1, 1, T) * 300 + 120
+    uv  = (torch.rand(1, 1, T) > 0.2).float()
+    n_out = (T if tag == 'v3' else 2 * T - 1) * hop
+    dur = n_out / vc['sample_rate']
+
+    full = FullCls(vc, lc, noise_on=True);  n, mm, uu = load_core(full, sd, vc, lc); full.eval()
+    det  = FullCls(vc, lc, noise_on=False); load_core(det, sd, vc, lc); det.eval()
+    p_full = os.path.join(out_dir, f'nhv_{tag}.onnx')          # ← デプロイ用の単一 ONNX(V1/V2 の full_vocoder 相当)
+    p_det = os.path.join(out_dir, f'_verify_{tag}_det.onnx')   # 検証専用(noise off で厳密照合)→ 後で削除
+    _export(full, (mel, f0, uv), p_full)
+    _export(det,  (mel, f0, uv), p_det)
+
+    feeds = {'mel': mel.numpy(), 'f0': f0.numpy(), 'uv': uv.numpy()}
+    y_ort = ort.InferenceSession(p_det, providers=['CPUExecutionProvider']).run(['waveform'], feeds)[0].reshape(1, -1)
+    with torch.no_grad():
+        y_det = det(mel, f0, uv)[0].reshape(1, -1).numpy()   # 出力[0]=waveform
+    fid = float(np.abs(y_ort - y_det).max())
+    # 3出力の整合: clamp(harmonic + noise) == waveform か(成分だけ取っても足せば波形に戻る)
+    sess = ort.InferenceSession(p_full, providers=['CPUExecutionProvider'])
+    wf, hm, ns = sess.run(['waveform', 'harmonic', 'noise'], feeds)
+    comp = float(np.abs(np.clip(hm + ns, -1.0, 1.0) - wf).max())
+    rt_torch = _rtf_torch(full, (mel, f0, uv), dur)
+    rt_ort   = _rtf_ort(sess, feeds, dur)
+    del sess
+    for _p in (p_det, p_det + '.data'):                       # 検証用は削除 → 出力は nhv_{tag}.onnx の単一ファイル
+        if os.path.exists(_p):
+            os.remove(_p)
+    print(f'[{tag}] -> {os.path.basename(p_full)} ({os.path.getsize(p_full)/1024/1024:.2f}MB, 単一)  '
+          f'copied {n}(miss {mm}/unexp {uu})  onnx-vs-torch={fid:.2e}  clamp(harm+noise)-wave={comp:.2e}  '
+          f'RTF torch={rt_torch:.4f}({1/rt_torch:.0f}x)  ORT={rt_ort:.4f}({1/rt_ort:.0f}x)')
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Export NHVSingV2 for inference.")
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--config",     type=str, default="config_v2.yaml")
-    parser.add_argument("--output_dir", type=str, default="exported_models/v2")
-    parser.add_argument("--all",        action="store_true")
-    parser.add_argument("--pytorch",    action="store_true", help="Export state_dict.")
-    parser.add_argument("--jit",        action="store_true", help="Export JIT-scripted model.")
-    parser.add_argument("--full_onnx",  action="store_true", help="Export unified full ONNX.")
-    parser.add_argument("--opset",      type=int, default=18)
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    config = load_config(args.config)
-
-    print("Loading NHVSingV2 from checkpoint...")
-    model = load_model(args.checkpoint, config)
-    print(f"  {sum(p.numel() for p in model.parameters()):,} parameters")
-
-    if args.all or args.pytorch:
-        export_pytorch_model(model, os.path.join(args.output_dir, "model.pth"))
-
-    if args.all or args.jit:
-        export_jit_model(model, os.path.join(args.output_dir, "model_jit.pt"))
-
-    if args.all or args.full_onnx:
-        export_full_onnx(model, config,
-                         save_path=os.path.join(args.output_dir, "full_vocoder.onnx"),
-                         opset=args.opset)
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--config', default='config_v3.yaml')
+    ap.add_argument('--ckpt', required=True)
+    ap.add_argument('--out', default='exported_models/v3')
+    args = ap.parse_args()
+    cfg = yaml.safe_load(open(args.config)); vc, lc = cfg['model']['vocoder'], cfg['model']['ltv_filter']
+    sd = torch.load(args.ckpt, map_location='cpu', weights_only=False)
+    sd = sd['model'] if 'model' in sd else sd
+    os.makedirs(args.out, exist_ok=True)
+    p_pth = os.path.join(args.out, 'nhv_v3.pth')             # V3/V3X 共有の重み(NHVSingV3 の state_dict)。V3X は重み共有なので onnx のみ
+    torch.save(sd, p_pth)
+    print(f'saved nhv_v3.pth ({os.path.getsize(p_pth)/1024/1024:.2f}MB, V3/V3X 共有重み)')
+    export_variant('v3',  FullVocoderV3,  vc, lc, sd, T=512, out_dir=args.out)
+    export_variant('v3x', FullVocoderV3X, vc, lc, sd, T=256, out_dir=args.out)
+    print('done.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

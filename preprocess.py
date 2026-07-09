@@ -1,472 +1,183 @@
-import sys
-import os
-import argparse
-import yaml
-from pathlib import Path
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import shutil
+"""NHVSing V3 preprocess — 歌唱 wav ディレクトリ → 学習用 shard npz。
 
-import matplotlib
-# Important: Specify the backend before importing pyplot
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+各 segment に対し:
+  - mel   : 44.1kHz / hop256 / fft2048 / 128mel(40-16000)/ **ln**(nvSTFT・pc-nsf 互換, center=False + reflect pad)
+  - F0    : **RMVPE 単体** + 跳躍除外(下記③④②new)。0=無声で保存(無声補間は学習時 dataset.norm_interp_f0)
+  - wav   : target_rms 正規化した segment 波形
+出力 npz キー: '<sid>|f0'(float32[T]), '<sid>|log_melspc'(float32[T,128] ln), '<sid>|wav'(float32[T*hop])。
 
+★ F0 は RMVPE のみ(DIO/Praat の合議は使わない)。RMVPE weights(rmvpe.pt ~173MB)は tools/f0 が初回自動DL。
+
+跳躍除外ルール(RMVPE 出力に適用。RMVPE は元々クリーンで稀にしか効かないが安全網):
+  ④ 両隣と半オク以上離れた単フレーム → 両隣の線形補間で埋める。
+  ③ 有声区間の端点(オンセット/オフセット)3フレーム以内の半オク跳躍 → 端点側を無声化。
+  ②new ≤3フレーム無声を挟んだ孤立短run(≤3)が両隣と半オク → run 全体を無声化。
+
+Usage:
+    python preprocess.py --indir <wav_dir> --out <npz_dir> --config config_v3.yaml
+"""
+import os, sys, glob, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
-import soundfile as sf
-from scipy.signal import resample_poly
 import librosa
-
-try:
-    import pyworld as pw
-    _PYWORLD_AVAILABLE = True
-except ImportError:
-    _PYWORLD_AVAILABLE = False
+import soundfile as sf
+import yaml
+from tqdm import tqdm
 
 from tools.cut_by_phrases import detect_regions, build_segments
+from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm
+
+HALF_OCT = 0.5           # 半オクターブ = log2 で 0.5
+SILENT_MEL_MAX = -9.2    # ln-mel の無音しきい値(全体がこれ未満なら無音 segment)
 
 
-def _interpolate_f0(f0: np.ndarray) -> np.ndarray:
-    """Linearly interpolate F0 over unvoiced (zero) regions."""
+def make_mel_fn(cfg):
+    SR, NFFT, HOP = cfg['sample_rate'], cfg['fft_size'], cfg['hop_size']
+    basis = librosa.filters.mel(sr=SR, n_fft=NFFT, n_mels=cfg['mel_dim'],
+                                fmin=cfg['mel_min'], fmax=cfg['mel_max'])
+
+    def wav_to_mel(y):
+        pad = (NFFT - HOP) // 2
+        yp = np.pad(y.astype(np.float64), (pad, pad), mode='reflect')
+        stft = librosa.stft(yp, n_fft=NFFT, hop_length=HOP, win_length=cfg['win_size'],
+                            window='hann', center=False)
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            mel = basis @ np.abs(stft)
+        return np.log(np.maximum(1e-5, mel)).astype(np.float32)   # [n_mels, T]
+    return wav_to_mel
+
+
+def active_rms(y, thresh_db=-40.0):
+    thresh = 10.0 ** (thresh_db / 20.0)
+    a = y[np.abs(y) > thresh]
+    if len(a) < max(1, int(len(y) * 0.01)):
+        return float(np.sqrt(np.mean(y ** 2)))
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+# ── 跳躍除外 ────────────────────────────────────────────────────────────────
+def _jump(a, b):
+    return abs(np.log2(a / b)) >= HALF_OCT
+
+
+def _segments(mask):
+    segs, i, n = [], 0, len(mask)
+    while i < n:
+        if mask[i]:
+            j = i
+            while j + 1 < n and mask[j + 1]:
+                j += 1
+            segs.append((i, j)); i = j + 1
+        else:
+            i += 1
+    return segs
+
+
+def clean_jumps(f0):
     f0 = f0.copy()
-    voiced = f0 > 0
-    if not voiced.any():
-        return f0
-    indices = np.arange(len(f0))
-    f0 = np.interp(indices, indices[voiced], f0[voiced])
+    # ④ 単フレームスパイク
+    for i in range(1, len(f0) - 1):
+        if f0[i] > 0 and f0[i - 1] > 0 and f0[i + 1] > 0 and _jump(f0[i], f0[i - 1]) and _jump(f0[i], f0[i + 1]):
+            f0[i] = 0.5 * (f0[i - 1] + f0[i + 1])
+    # ③ 端点の隣接跳躍 → 端点側を無声化
+    orig = f0.copy()
+    for a, b in _segments(orig > 0):
+        for j in range(a + 1, min(a + 4, b + 1)):
+            if _jump(orig[j], orig[j - 1]):
+                f0[a:j] = 0.0; break
+        for j in range(b, max(b - 3, a), -1):
+            if _jump(orig[j], orig[j - 1]):
+                f0[j:b + 1] = 0.0; break
+    # ②new ≤3フレーム無声を挟んだ孤立短run(≤3)が両隣と半オク → run 全体を無声化
+    orig = f0.copy()
+    runs = _segments(orig > 0)
+    for idx, (a, b) in enumerate(runs):
+        if b - a + 1 > 3:
+            continue
+        left = orig[runs[idx - 1][1]] if idx > 0 and a - runs[idx - 1][1] - 1 <= 3 else None
+        right = orig[runs[idx + 1][0]] if idx < len(runs) - 1 and runs[idx + 1][0] - b - 1 <= 3 else None
+        med = float(np.median(orig[a:b + 1]))
+        off_l = left is not None and _jump(med, left)
+        off_r = right is not None and _jump(med, right)
+        if (off_l and off_r) or (off_l and right is None) or (off_r and left is None):
+            f0[a:b + 1] = 0.0
     return f0
 
-# --- Utility Functions ---
 
-def load_config(path: str) -> dict:
-    """Load a YAML configuration file."""
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def rmvpe_f0(algo, thr, wav, length):
+    pitch, voiced, _ = algo.extract_pitch(wav.astype(np.float32), thresholds=thr)
+    f0 = np.where(np.asarray(voiced) > 0, np.asarray(pitch), 0.0).astype(np.float32)
+    if len(f0) < length:
+        f0 = np.pad(f0, (0, length - len(f0)))
+    return f0[:length]
 
 
-# --- Worker function for parallel NPZ creation ---
-
-def _process_one_wav(wav_path_str: str, output_dir_str: str, cfg: dict) -> str:
-    """1 ファイルを処理するワーカー関数（ProcessPoolExecutor から呼ばれる）。
-
-    トップレベルに定義しないと pickle できないため、ここに置く。
-    戻り値は "ok" / "skip" / "error:<メッセージ>" の文字列。
-    """
-    wav_path   = Path(wav_path_str)
-    output_dir = Path(output_dir_str)
-    save_path  = output_dir / f"{wav_path.stem}.npz"
-
-    if save_path.exists():
-        return "skip"
-
-    y, sr = sf.read(wav_path)
-    y = y * cfg['scale']
-    if sr != cfg['sample_rate']:
-        return f"error:sample_rate mismatch {sr} != {cfg['sample_rate']} ({wav_path.name})"
-
-    frame_size = cfg['frame_size']
-    y = y[:frame_size * (len(y) // frame_size)]
-
-    f0_extractor = cfg.get('f0_extractor', 'harvest')
-
-    if f0_extractor == 'rmvpe':
-        import sys as _sys
-        _project_root = cfg.get('_project_root', '.')
-        if _project_root not in _sys.path:
-            _sys.path.insert(0, _project_root)
-        from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm
-        _abs_max = np.abs(y).max()
-        y_norm = (y / _abs_max if _abs_max > 1e-6 else y).astype(np.float32)
-        y_norm = np.clip(y_norm, -1.0, 1.0)
-        algo = RMVPEPitchAlgorithm(
-            sample_rate=sr,
-            hop_size=cfg['hop_size'],
-            fmin=cfg['f0_min'],
-            fmax=cfg['f0_max'],
-            device=cfg.get('rmvpe_device', 'cpu'),
-        )
-        f0_raw, voiced_flag, _ = algo.extract_pitch(y_norm)
-        f0_raw[~voiced_flag] = 0.0  # unvoiced frames → 0 before interpolation
-        f0_raw = _interpolate_f0(f0_raw)
-    else:
-        if not _PYWORLD_AVAILABLE:
-            return "error:pyworld not installed. Use f0_extractor: rmvpe or install pyworld."
-        frame_period = cfg['hop_size'] / cfg['sample_rate'] * 1000
-        f0_raw, _ = pw.harvest(
-            y.astype(np.float64), sr,
-            f0_floor=cfg['f0_min'],
-            f0_ceil=cfg['f0_max'],
-            frame_period=frame_period,
-        )
-
-    S = librosa.feature.melspectrogram(
-        y=y,
-        sr=cfg['sample_rate'],
-        n_fft=cfg['fft_size'],
-        hop_length=cfg['hop_size'],
-        win_length=cfg['hop_size'] * 4,
-        n_mels=cfg['mel_dim'],
-        fmin=cfg['mel_min'],
-        fmax=cfg['mel_max'],
-        center=True,
-    )
-    log_melspc = librosa.power_to_db(S, ref=1.0).T  # (T, D)
-
-    hop_size = cfg['hop_size']
-    n_frames = min(len(f0_raw), len(log_melspc))
-    final_n_frames = min(n_frames * hop_size, len(y)) // hop_size
-
-    np.savez(
-        save_path,
-        f0=f0_raw[:final_n_frames],
-        log_melspc=log_melspc[:final_n_frames],
-        wav=y[:final_n_frames * hop_size],
-    )
-    return "ok"
-
-
-# --- Dataset Creation Steps ---
-
-def step_resample_wavs(input_dir: Path, output_dir: Path, sample_rate: int, prefix: str):
-    """Resample WAV files, add a prefix, and save to a flat directory."""
-    print(f"--- Step 1: Resampling and Adding Prefix ---")
-    print(f"Input dir: {input_dir}")
-    print(f"Output dir: {output_dir}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wav_paths = sorted(list(input_dir.rglob("*.wav")))
-    
-    if not wav_paths:
-        print("Warning: No WAV files found in the input directory.")
-        return
-
-    for in_path in tqdm(wav_paths, desc="Resampling"):
-        # Save with prefix in a flat structure
-        out_path = output_dir / f"{prefix}_{in_path.stem}.wav"
-        if out_path.exists():
-            continue
-        
-        wav, sr = sf.read(in_path, always_2d=False)
-        if wav.ndim == 2:
-            wav = wav.mean(axis=1)
-        wav = wav.astype(np.float32)
-
-        if sr != sample_rate:
-            wav = resample_poly(wav, sample_rate, sr)
-
-        sf.write(out_path, wav, sample_rate)
-
-def step_cut_wavs(input_dir: Path, output_dir: Path, cfg: dict):
-    """Split WAV files into phrase-based segments using the cut_by_phrases algorithm."""
-    print(f"\n--- Step 2: Cutting WAVs by phrases ---")
-    print(f"Input dir: {input_dir}")
-    print(f"Output dir: {output_dir}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wav_paths = sorted(list(input_dir.rglob("*.wav")))
-
-    if not wav_paths:
-        print("Warning: No WAV files found in the input directory.")
-        return
-
-    cut_cfg = cfg.get('cut_wavs', {})
-    silence_thresh_db = cut_cfg.get('silence_thresh', -50.0)
-    min_silence_dur   = cut_cfg.get('min_silence_dur', 0.10)
-    max_dur           = cut_cfg.get('max_dur', 9.0)
-    long_silence      = cut_cfg.get('long_silence', 1.0)
-    pad               = cut_cfg.get('pad', 0.10)
-
-    print(f"  silence_thresh={silence_thresh_db} dBFS, min_silence_dur={min_silence_dur}s, "
-          f"max_dur={max_dur}s, long_silence={long_silence}s, pad={pad}s")
-
-    max_seg_len_s = 0.0
-
-    for wav_path in tqdm(wav_paths, desc="Cutting"):
-        audio, sr = sf.read(str(wav_path), always_2d=False)
-        if audio.ndim == 2:
-            audio = audio.mean(axis=1)
-        audio = audio.astype(np.float32)
-
-        regions = detect_regions(audio, sr,
-                                 silence_thresh_db=silence_thresh_db,
-                                 min_silence_dur=min_silence_dur)
-
-        segments = build_segments(regions, sr,
-                                  max_dur=max_dur,
-                                  long_silence=long_silence,
-                                  pad=pad,
-                                  total_samples=len(audio))
-
-        for idx, (s, e) in enumerate(segments):
-            chunk = audio[s:e]
-            dur = (e - s) / sr
-            if dur > max_seg_len_s:
-                max_seg_len_s = dur
-            save_path = output_dir / f"{wav_path.stem}_{idx:04d}.wav"
-            sf.write(str(save_path), chunk, sr)
-
-    if max_seg_len_s > 0:
-        print(f"Max length of cut audio: {max_seg_len_s:.2f} seconds")
-
-def step_create_npz(input_dir: Path, output_dir: Path, cfg: dict, num_workers: int):
-    """Extract features from WAV files and save them in NPZ format."""
-    print(f"\n--- Step 3: Creating NPZ files ---")
-    print(f"Input dir  : {input_dir}")
-    print(f"Output dir : {output_dir}")
-    print(f"num_workers: {num_workers}")
-    print(f"f0_min={cfg['f0_min']}, f0_max={cfg['f0_max']}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wav_paths = sorted(list(input_dir.glob("*.wav")))
-
-    if not wav_paths:
-        print("Warning: No WAV files found in the input directory.")
-        return
-
-    cfg = dict(cfg)
-    cfg['_project_root'] = str(Path(__file__).resolve().parent)
-
-    if cfg.get('f0_extractor') == 'rmvpe' and num_workers > 1:
-        print(f"  Note: RMVPE loads a neural model per worker. Forcing num_workers=1.")
-        num_workers = 1
-
-    n_ok = n_skip = n_err = 0
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {
-            executor.submit(_process_one_wav, str(p), str(output_dir), cfg): p
-            for p in wav_paths
-        }
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Creating NPZ"):
-            result = future.result()
-            if result == "ok":
-                n_ok += 1
-            elif result == "skip":
-                n_skip += 1
-            else:
-                n_err += 1
-                print(f"\n  ERROR: {result}")
-
-    print(f"完了: {n_ok} 処理, {n_skip} スキップ, {n_err} エラー")
-
-def step_plot_f0_validation(npz_dir: Path, img_dir: Path, cfg: dict):
-    """Plots F0 and mel-spectrogram from NPZ files and saves them as images."""
-    print(f"\n--- Step 4: Starting F0 Validation Plot Creation ---")
-    print(f"Input source: {npz_dir}")
-    print(f"Output destination: {img_dir}")
-
-    img_dir.mkdir(parents=True, exist_ok=True)
-    npz_paths = sorted(list(npz_dir.glob("*.npz")))
-
-    if not npz_paths:
-        print("Warning: No NPZ files found in the input directory.")
-        return
-
-    # Parameters for mel scale conversion
-    mel_dim = cfg['mel_dim']
-    mel_min_hz = cfg['mel_min']
-    mel_max_hz = cfg['mel_max']
-    mel_min = librosa.hz_to_mel(mel_min_hz)
-    mel_max = librosa.hz_to_mel(mel_max_hz)
-
-    for npz_path in tqdm(npz_paths, desc="Plotting"):
-        # Determine output path and skip if it exists
-        img_path = img_dir / f"{npz_path.stem}.png"
-        if img_path.exists():
-            continue
-
-        data = np.load(npz_path)
-        f0_hz = data['f0']
-        log_melspc = data['log_melspc']
-
-        # Convert F0 to mel bin index
-        f0_hz_with_nan = np.copy(f0_hz).astype(float)
-        f0_hz_with_nan[f0_hz_with_nan == 0] = np.nan
-        f0_mel = librosa.hz_to_mel(f0_hz_with_nan)
-        f0_mel_bins = (f0_mel - mel_min) * (mel_dim - 1) / (mel_max - mel_min)
-
-        # Create plot
-        fig, ax = plt.subplots(figsize=(15, 6))
-        
-        img = ax.imshow(log_melspc.T, origin='lower', aspect='auto', cmap='magma')
-        fig.colorbar(img, ax=ax, format='%+2.0f dB', label='Magnitude (dB)')
-
-        ax.plot(
-            np.arange(len(f0_mel_bins)), f0_mel_bins,
-            color='cyan', linestyle='-', marker='.', markersize=2, linewidth=1,
-            label='F0 (on Mel-bin scale)'
-        )
-
-        # Limit Y-axis to 1000Hz equivalent
-        limit_hz = 1000.0
-        limit_mel = librosa.hz_to_mel(limit_hz)
-        limit_mel_bin = (limit_mel - mel_min) * (mel_dim - 1) / (mel_max - mel_min)
-        ax.set_ylim(0, limit_mel_bin)
-
-        ax.set_title(f'Log-Mel Spectrogram and F0: {npz_path.stem}')
-        ax.set_xlabel('Frame Index')
-        ax.set_ylabel(f'Mel Bin Index (0-{mel_dim-1})')
-        ax.legend()
-        
-        # Save to file and release memory
-        fig.savefig(img_path, bbox_inches='tight')
-        plt.close(fig)
-
-def step_filter_npz(npz_dir: Path, f0_img_dir: Path, cfg: dict):
-    """Filters NPZ files based on frame length and moves corresponding F0 plots.
-    If the extracted audio is too short, F0 is often not estimated correctly.
-    Also, very long audio can cause out-of-memory issues during training.
-    If memory allows, longer audio can be tolerated.
-    """
-    print(f"\n--- Step 5: Starting NPZ File Filtering ---")
-    
-    filter_cfg = cfg.get('data_filtering')
-    if not filter_cfg:
-        print("Warning: 'data_filtering' not found in config file, skipping.")
-        return
-
-    min_frames = filter_cfg.get('min_frames', 0)
-    max_frames = filter_cfg.get('max_frames', float('inf'))
-    backup_dir = Path(filter_cfg.get('backup_dir', 'dataset/npz_backup'))
-    
-    # Also set the backup destination for F0 plot images
-    f0_img_backup_dir = backup_dir.with_name(backup_dir.name + '_f0_imgs')
-
-    print(f"Input source (NPZ): {npz_dir}")
-    print(f"Backup destination (NPZ): {backup_dir}")
-    print(f"Backup destination (F0 Imgs): {f0_img_backup_dir}")
-    print(f"Allowed frame length: {min_frames} - {max_frames}")
-
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    f0_img_backup_dir.mkdir(parents=True, exist_ok=True)
-    
-    npz_paths = sorted(list(npz_dir.glob("*.npz")))
-
-    if not npz_paths:
-        print("Warning: No NPZ files found in the input directory.")
-        return
-
-    moved_count = 0
-    for npz_path in tqdm(npz_paths, desc="Filtering NPZ"):
-        try:
-            with np.load(npz_path) as data:
-                if 'log_melspc' in data:
-                    num_frames = data['log_melspc'].shape[0]
-                else:
-                    print(f"Warning: 'log_melspc' not found in {npz_path.name}. Skipping.")
-                    continue
-            
-            if not (min_frames <= num_frames <= max_frames):
-                # Move NPZ file
-                shutil.move(str(npz_path), str(backup_dir / npz_path.name))
-                
-                # Move corresponding F0 plot image
-                img_path = f0_img_dir / f"{npz_path.stem}.png"
-                if img_path.exists():
-                    shutil.move(str(img_path), str(f0_img_backup_dir / img_path.name))
-                
-                moved_count += 1
-
-        except Exception as e:
-            print(f"Error processing {npz_path.name}: {e}")
-
-    print(f"Filtering complete. {moved_count} files moved to backup destination.")
-
-
-def step_split_train_test(npz_dir: Path, train_dir: Path, test_dir: Path, cfg: dict):
-    """Copy NPZ files from npz_dir into train/test directories based on the configured ratio.
-
-    Files are sorted for reproducibility, then distributed so that every
-    (train + test)-th file starting at index `train` goes to test.
-    Example with train=100, test=1: indices 100, 201, 302, ... → test.
-    """
-    print(f"\n--- Step 6: Splitting NPZ into train/test ---")
-
-    split_cfg = cfg.get('train_test_split', {})
-    train_ratio = split_cfg.get('train', 100)
-    test_ratio  = split_cfg.get('test', 1)
-    total_ratio = train_ratio + test_ratio
-
-    print(f"Input source: {npz_dir}")
-    print(f"Train dir:    {train_dir}  (ratio: {train_ratio})")
-    print(f"Test dir:     {test_dir}  (ratio: {test_ratio})")
-
-    npz_paths = sorted(list(npz_dir.glob("*.npz")))
-    if not npz_paths:
-        print("Warning: No NPZ files found in the input directory.")
-        return
-
-    train_dir.mkdir(parents=True, exist_ok=True)
-    test_dir.mkdir(parents=True, exist_ok=True)
-
-    n_train = n_test = 0
-    for i, npz_path in enumerate(npz_paths):
-        if i % total_ratio >= train_ratio:
-            dst = test_dir / npz_path.name
-            n_test += 1
-        else:
-            dst = train_dir / npz_path.name
-            n_train += 1
-        shutil.copy2(str(npz_path), str(dst))
-
-    print(f"Split complete: train={n_train}, test={n_test}  (total={len(npz_paths)})")
-
-
-# --- Main Processing ---
 def main():
-    parser = argparse.ArgumentParser(description="Audio dataset preprocessing script", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to the configuration file")
-    parser.add_argument("--step", type=str, default="all", choices=["all", "resample", "cut", "npz", "plot", "filter", "split"], help="Select the processing step to execute")
-    parser.add_argument("--num_workers", type=int, default=os.cpu_count(), help="Number of parallel workers for the npz step")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description='NHVSing V3 preprocess (RMVPE F0)')
+    ap.add_argument('--indir', required=True, help='歌唱 wav の入ったディレクトリ(再帰探索)')
+    ap.add_argument('--out', required=True, help='shard npz の出力先')
+    ap.add_argument('--config', default='config_v3.yaml')
+    ap.add_argument('--segs_per_shard', type=int, default=500)
+    args = ap.parse_args()
 
-    try:
-        cfg = load_config(args.config)
-        p_cfg = cfg['preprocess']
-    except (FileNotFoundError, KeyError) as e:
-        print(f"Error: Failed to load configuration file '{args.config}'. Details: {e}")
-        return
+    cfg = yaml.safe_load(open(args.config))['preprocess']
+    SR, HOP = cfg['sample_rate'], cfg['hop_size']
+    TARGET_RMS = cfg['target_rms']
+    MIN_FRAMES = cfg['data_filtering']['min_frames']
+    cw = cfg['cut_wavs']
+    wav_to_mel = make_mel_fn(cfg)
+    algo = RMVPEPitchAlgorithm(sample_rate=SR, hop_size=HOP, fmin=cfg['f0_min'], fmax=cfg['f0_max'])
+    thr = algo._get_default_threshold()
+    os.makedirs(args.out, exist_ok=True)
 
-    raw_wav_dir = Path(p_cfg['raw_wav_dir'])
-    resample_wav_dir = Path(p_cfg['resample_wav_dir'])
-    cut_wav_dir = Path(p_cfg['cut_wav_dir'])
-    npz_dir = Path(p_cfg['npz_dir'])
-    f0_img_dir = Path(p_cfg['f0_img_dir'])
-    train_dir = Path(cfg['training']['train_dir'])
-    test_dir  = Path(cfg['training']['test_dir'])
+    wavs = sorted(glob.glob(os.path.join(args.indir, '**', '*.wav'), recursive=True))
+    print(f'{len(wavs)} wav files, RMVPE threshold={thr}, target_rms={TARGET_RMS}')
+    shard, shard_i, nseg, nskip = {}, 0, 0, 0
 
-    # RMVPE availability check — fail fast before any processing starts
-    if p_cfg.get('f0_extractor') == 'rmvpe' and args.step in ["all", "npz"]:
-        project_root = str(Path(__file__).resolve().parent)
-        import sys as _sys
-        if project_root not in _sys.path:
-            _sys.path.insert(0, project_root)
-        try:
-            from tools.f0.algorithms.rmvpe import RMVPEPitchAlgorithm  # noqa: F401
-            print("✅ RMVPE: import OK")
-        except Exception as e:
-            print(f"❌ f0_extractor='rmvpe' が指定されていますが、RMVPEをインポートできません: {e}")
-            print("   tools/f0/algorithms/rmvpe.py が存在するか確認してください。")
-            return
+    def flush():
+        nonlocal shard, shard_i
+        if shard:
+            np.savez_compressed(os.path.join(args.out, f'shard-{shard_i:04d}.npz'), **shard)
+            shard = {}; shard_i += 1
 
-    if args.step in ["all", "resample"]:
-        step_resample_wavs(raw_wav_dir, resample_wav_dir, p_cfg['sample_rate'], p_cfg['prefix'])
+    for wp in tqdm(wavs):
+        y, sr0 = sf.read(wp)
+        if y.ndim > 1:
+            y = y.mean(1)
+        y = y.astype(np.float32)
+        if sr0 != SR:
+            y = librosa.resample(y.astype(np.float64), orig_sr=sr0, target_sr=SR).astype(np.float32)
+        regions = detect_regions(y, SR, silence_thresh_db=cw['silence_thresh'],
+                                 min_silence_dur=cw['min_silence_dur'])
+        segs = build_segments(regions, SR, max_dur=cw['max_dur'], long_silence=cw['long_silence'],
+                              pad=cw['pad'], total_samples=len(y))
+        stem = os.path.splitext(os.path.basename(wp))[0]
+        for idx, (s, e) in enumerate(segs):
+            yseg = y[s:e].copy()
+            rms = active_rms(yseg.astype(np.float64))
+            if rms > 1e-4:
+                yseg = yseg * (TARGET_RMS / rms)
+            yseg = np.clip(yseg, -1.0, 1.0).astype(np.float32)
+            mel = wav_to_mel(yseg)                                   # [n_mels, T]
+            if mel.shape[1] < MIN_FRAMES or mel.max() < SILENT_MEL_MAX:
+                nskip += 1; continue
+            f0 = clean_jumps(rmvpe_f0(algo, thr, yseg, mel.shape[1]))
+            T = min(mel.shape[1], len(f0))
+            if T < MIN_FRAMES:
+                nskip += 1; continue
+            ywav = yseg[:T * HOP]
+            if len(ywav) < T * HOP:
+                ywav = np.pad(ywav, (0, T * HOP - len(ywav)))
+            sid = f'{stem}_{idx:04d}'
+            shard[f'{sid}|f0'] = f0[:T].astype(np.float32)
+            shard[f'{sid}|log_melspc'] = mel[:, :T].T.astype(np.float32)   # [T, n_mels] ln
+            shard[f'{sid}|wav'] = ywav.astype(np.float32)
+            nseg += 1
+            if nseg % args.segs_per_shard == 0:
+                flush()
+    flush()
+    print(f'done: {nseg} segments, {nskip} skipped -> {args.out}')
 
-    if args.step in ["all", "cut"]:
-        step_cut_wavs(resample_wav_dir, cut_wav_dir, p_cfg)
 
-    if args.step in ["all", "npz"]:
-        step_create_npz(cut_wav_dir, npz_dir, p_cfg, args.num_workers)
-
-    if args.step in ["all", "plot"]:
-        step_plot_f0_validation(npz_dir, f0_img_dir, p_cfg)
-
-    if args.step in ["all", "filter"]:
-        step_filter_npz(npz_dir, f0_img_dir, p_cfg)
-
-    if args.step in ["all", "split"]:
-        step_split_train_test(npz_dir, train_dir, test_dir, p_cfg)
-
-    print("All processing steps completed.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

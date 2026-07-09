@@ -15,45 +15,76 @@ class VocoderDataset(Dataset):
         amp_aug_range (tuple): (min, max) linear amplitude scale. Default (0.5, 2.0).
     """
     def __init__(self, dataset_dir: str, hop_size: int, validate: bool = False,
-                 augment: bool = False, amp_aug_range: tuple = (0.5, 2.0)):
+                 augment: bool = False, amp_aug_range: tuple = (0.5, 2.0),
+                 diffsinger_mel: bool = False):
         self.dataset_path = Path(dataset_dir)
         self.hop_size = hop_size
         self.augment = augment
+        # V3: ln-magnitude mel(OpenUtau/pc_nsf)のとき amp 補正は +ln(alpha)。
+        # 既定 False は V2 互換 (power_to_db, +20*log10(alpha))。
+        self.diffsinger_mel = diffsinger_mel
         self.amp_aug_log_min = np.log(amp_aug_range[0])
         self.amp_aug_log_max = np.log(amp_aug_range[1])
         # .rglob("*.npz") を使ってサブディレクトリ内も再帰的に検索
         self.file_paths = sorted(list(self.dataset_path.rglob("*.npz")))
 
+        # index: (npz_path, seg_id) のリスト。両形式に対応:
+        #   - segment npz (1ファイル=1 segment, key='log_melspc'/'f0'/'wav') → seg_id=None [後方互換]
+        #   - shard   npz (1ファイル=複数 segment, key='<sid>|log_melspc' 等) → seg_id ごとに展開
+        # 全 npz を1回 peek するので、validate の壊れ除外もここで兼ねる。
+        self.index: list = []
+        n_bad = 0
+        n_silent = 0
+        n_unvoiced = 0
+        SILENT_MEL_MAX = -9.2  # ln-mel(OpenUtau/pc_nsf): log10 の -4.0 相当(×2.3026)。mel max がこれ未満は無音
+        for p in self.file_paths:
+            try:
+                f = np.load(p)
+                keys = list(f.files)
+            except Exception as e:
+                if validate:
+                    print(f"  [skip] 壊れたファイルをスキップ: {p.name} ({e})")
+                n_bad += 1
+                continue
+            if 'log_melspc' in keys:                                  # segment npz（後方互換）
+                if f['log_melspc'].max() < SILENT_MEL_MAX:
+                    n_silent += 1
+                elif not (f['f0'] > 0).any():                         # 安全網: F0 が全 frame 0(完全無声)→ 除外
+                    n_unvoiced += 1
+                else:
+                    self.index.append((p, None))
+            else:                                                     # shard npz
+                sids = sorted({k.rsplit('|', 1)[0] for k in keys if k.endswith('|log_melspc')})
+                for sid in sids:
+                    if f[sid + '|log_melspc'].max() < SILENT_MEL_MAX:
+                        n_silent += 1
+                    elif not (f[sid + '|f0'] > 0).any():              # 安全網: F0 が全 frame 0(完全無声)→ 除外
+                        n_unvoiced += 1
+                    else:
+                        self.index.append((p, sid))
+            f.close()
         if not self.file_paths:
             print(f"警告: '{dataset_dir}' 内に .npz ファイルが見つかりませんでした。")
-        elif validate:
-            # 壊れた NPZ を事前に除外（Drive 読み込み時は遅いので validate=True のときのみ）
-            valid = []
-            n_bad = 0
-            for p in self.file_paths:
-                try:
-                    with np.load(p) as f:
-                        _ = f['log_melspc'].shape[0]
-                    valid.append(p)
-                except Exception as e:
-                    print(f"  [skip] 壊れたファイルをスキップ: {p.name} ({e})")
-                    n_bad += 1
-            self.file_paths = valid
-            print(f"Found {len(self.file_paths)} valid files in {dataset_dir}"
-                  + (f" ({n_bad} corrupted skipped)" if n_bad else ""))
         else:
-            print(f"Found {len(self.file_paths)} files in {dataset_dir}")
+            print(f"Found {len(self.index)} segments in {len(self.file_paths)} npz "
+                  f"in {dataset_dir}"
+                  + (f" ({n_bad} corrupted skipped)" if n_bad else "")
+                  + (f" ({n_silent} silent skipped)" if n_silent else "")
+                  + (f" ({n_unvoiced} unvoiced skipped)" if n_unvoiced else ""))
 
     def __len__(self):
-        return len(self.file_paths)
+        return len(self.index)
 
     def __getitem__(self, idx):
-        npz_path = self.file_paths[idx]
+        npz_path, seg_id = self.index[idx]
         npz = np.load(npz_path)
 
-        f0 = npz['f0']
-        log_melspc = npz['log_melspc']
-        wav = npz['wav']
+        if seg_id is None:                       # segment npz（後方互換）
+            f0 = npz['f0']; log_melspc = npz['log_melspc']; wav = npz['wav']
+        else:                                    # shard npz
+            f0 = npz[seg_id + '|f0']
+            log_melspc = npz[seg_id + '|log_melspc']
+            wav = npz[seg_id + '|wav']
 
         # フレーム数 × hop_size に長さを厳密に合わせる
         n_frames = log_melspc.shape[0]
@@ -65,7 +96,7 @@ class VocoderDataset(Dataset):
         elif len(wav) < expected_wav_len:
             wav = np.pad(wav, (0, expected_wav_len - len(wav)))
 
-        if self.augment:
+        if self.augment and wav.size > 0:
             max_abs = np.abs(wav).max()
             if max_abs > 1e-6:
                 # ピーク振幅が 0.99 を超えないよう alpha の上限をキャップ
@@ -73,8 +104,13 @@ class VocoderDataset(Dataset):
                 log_alpha_max = max(log_alpha_max, self.amp_aug_log_min)
                 alpha = np.exp(np.random.uniform(self.amp_aug_log_min, log_alpha_max))
                 wav = wav * alpha
-                # log_melspc は power_to_db (10*log10(power)) なので +20*log10(alpha) で補正
-                log_melspc = log_melspc + 20.0 * np.log10(alpha)
+                # 振幅 alpha 倍 → mel の log 補正:
+                #   V2 power_to_db (10*log10(power), power∝alpha²) → +20*log10(alpha)
+                #   V3 ln-magnitude (magnitude∝alpha, OpenUtau/pc_nsf) → +1*ln(alpha)
+                if self.diffsinger_mel:
+                    log_melspc = log_melspc + np.log(alpha)            # ln-mel
+                else:
+                    log_melspc = log_melspc + 20.0 * np.log10(alpha)   # V2 power_to_db
 
         f0, uv = norm_interp_f0(f0)
 

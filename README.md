@@ -6,9 +6,109 @@
 
 [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。
 
-本リポジトリには **NHVSing**（単一話者特化モデル）と **NHVSingV2**（多話者汎用モデル）の2つのモデルクラスが含まれます。
+本リポジトリには最新の **NHVSing V3 / V3X**（推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。
 
 ***
+
+## NHVSing V3 / V3X（最新・推奨）
+
+**V3** は NHV を歌声向けに突き詰めた最新モデルです（44.1kHz / hop256 / 128-mel[40–16000Hz, **ln**]）。V2 からの本質的な改良は3点:
+
+- **MRD (Multi-Resolution Discriminator) の採用**（+ MPD）: 品質向上の最大の要因。UnivNet 系の多解像度スペクトログラム magnitude 判別。
+- **インパルス応答生成の高速化 (`fft_corr`)**: LTV-FIR の時間相関を FFT 化。時間領域版とビット等価で CPU 約8倍速。
+- **教師データの選別、水増し**: 44.1kHzの高音質な音声を集め、さらに学習中に音量と音高をランダムに変化させながら与えた。普通の波形から逸脱したものを学習で与えることになりそうだが、ボコーダーの汎化性能はこれで有意に向上した。
+- **励起・条件の整理**: 高音質化を図る対策を沢山講じたが、上の2つの方法の効果が大きく、一旦構成を元論文準拠のものにした。構成を大幅に変えることがあればV4以降になると思われる。白色 200 倍音 / quef_norm α=1.0 / **mel のみ入力**（F0 embedding 廃止）/ F0 は linear 補間（元論文 NHV への回帰）。
+
+**V3X** は V3 を **hop512 入力**で使えるようにした派生です。OpenUtau 等が出す hop512 の mel/F0 を受け、内部で整列中点補間して hop256 グリッドへ戻してから V3 を通します（重み・state_dict は V3 と共有）。**V1/V2 の「hop512 だと品質が大きく落ちる」問題を解消**します。
+
+| クラス | 用途 | config |
+|---|---|---|
+| `NHVSing` | V1 legacy（単一話者） | `config.yaml` |
+| `NHVSingV2` | V2 legacy（多話者） | `config_v2.yaml` |
+| **`NHVSingV3`** | **最終モデル（hop256 native）** | **`config_v3.yaml`** |
+| **`NHVSingV3X`** | **V3 の hop512 入力版** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
+
+### 性能（V3）
+
+**モデルサイズ**: `nhv_v3.onnx` は **約 2.2 MB**（量子化なし）。比較対象の NSF-HiFiGAN（pc-nsf-hifigan, 56.7 MB）の **約 1/26** です。
+
+**RTF**（Real-Time Factor = 音声 1 秒あたりの計算秒数。小さいほど速く、< 1 で実時間より速い）。測定環境は Apple 10 コア CPU / 約 5 秒入力 / バッチ 1 / 9 回中央値。
+
+ONNX Runtime（CPU）で NSF-HiFiGAN と並べると:
+
+| スレッド数 | NHVSing V3 | NSF-HiFiGAN | NHVSing の速さ |
+|---|---|---|---|
+| 1 | 0.076 (13×) | 0.604 (2×) | **8.0×** |
+| 2 | 0.065 (15×) | 0.316 (3×) | 4.9× |
+| 4 | 0.062 (16×) | 0.201 (5×) | 3.3× |
+| 8 | 0.063 (16×) | 0.198 (5×) | 3.1× |
+
+**コア数への依存が両者で大きく異なります。** NHVSing V3 は各フレームのインパルス応答生成が完全に独立（*embarrassingly parallel*）ですが、**ONNX Runtime はこの並列性をほとんど活かせず**、実質シングルコア律速です（13×→16× で頭打ち）。一方 NSF-HiFiGAN は大きな転置畳み込みが良く並列化し、コアを増やすほど速くなります（2×→5×）。この結果、**NHVSing の速度優位は低コア環境で最大（〜8×）、多コアでは 〜3× に縮小**しますが、どの条件でも上回ります。
+
+**PyTorch（ネイティブ）では並列性が活きます。** 同じ V3 を torch で回すと、per-frame の独立性どおりコア数でスケールします:
+
+| スレッド数 | ONNX Runtime | PyTorch |
+|---|---|---|
+| 1 | 0.076 (13×) | 0.082 (12×) |
+| 2 | 0.065 (15×) | 0.050 (20×) |
+| 4 | 0.062 (16×) | 0.043 (23×) |
+| 8 | 0.063 (16×) | **0.031 (32×)** |
+
+多コアでは **torch の方が自前 ONNX より速い**（8 スレッドで約 2 倍）という逆転が起きます。極小・FFT 主体のモデルゆえ、ORT のグラフ最適化よりも torch のバッチ FFT 並列化のほうが効くためです。したがって「NHVSing は遅い/速い」は単一の数字では語れず、**ランタイムとコア数の組み合わせで決まります**。
+
+> RTF は計算量のみに依存し、モデルの重み値には依存しません（どの ckpt でも同じ）。
+
+ONNX は `LTVFirONNX` の FFT 長を **2 の冪へ pad** して高速化しています（ONNX Runtime の DFT は 2 の冪サイズのみ高速）。V3X も同等です。LTV-FIR の時間相関自体も `fft_corr` で FFT 化済み（時間領域版とビット等価で CPU 約 8 倍速。上記「主な変更点」参照）。
+
+### 使い方（V3）
+
+**前処理**（F0 = RMVPE 単体 + 跳躍除外。初回に `rmvpe.pt` を自動DL）:
+```bash
+python preprocess.py --indir <歌唱wavディレクトリ> --out <npz_dir> --config config_v3.yaml
+```
+
+> **train / test の分け方**: `preprocess.py` は `--out` に全 shard を出力するだけで、train/test の自動振り分けはしません。**wav を学習用・検証用に分けて2回実行**し、それぞれ別ディレクトリへ出力してください（少数の held-out 曲を test に回せば十分）:
+> ```bash
+> python preprocess.py --indir wavs/train --out dataset/train --config config_v3.yaml
+> python preprocess.py --indir wavs/eval  --out dataset/test  --config config_v3.yaml
+> ```
+> `config_v3.yaml` の `training.train_dir` / `test_dir` をそれぞれのディレクトリに設定します。`VocoderDataset` は shard（`<sid>|f0` / `|log_melspc` / `|wav`）・単一 segment npz の両方を再帰的に読むので、どちらの形式でも構いません。
+
+**学習**（MRD + MPD GAN。`config_v3.yaml` の `training.train_dir` / `test_dir` / `snapshot_dir` 等を設定）:
+```bash
+python train_v3.py --config config_v3.yaml
+```
+
+**ONNX エクスポート**（V3・V3X の両方。3出力: `waveform` / `harmonic` / `noise`）:
+```bash
+python export.py --config config_v3.yaml --ckpt <weights.ckpt> --out exported_models
+```
+既定で `exported_models/v3/` に以下を出力します:
+
+- **`nhv_v3.pth`** — V3/V3X 共有の重み（`NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))` でロード可）。**V3X は重みを V3 と共有するので `.pth` は無し**（onnx のみ）。
+- **`nhv_v3.onnx` / `nhv_v3x.onnx`** — 各 **NN + DSP 全部入りの単一 ONNX**（重み内蔵・`.onnx.data` 等の外部ファイル無し・ONNXRuntime のみで推論可能。V1/V2 の `full_vocoder.onnx` と同形式）。入力 `mel` / `f0` / `uv` → 出力 `waveform` / `harmonic` / `noise` の3出力で、`clamp(harmonic + noise) == waveform`。入力長 T は動的（任意長）。
+
+**推論（Python）**:
+```python
+from nhv_vocoder import NHVVocoder
+voc = NHVVocoder('weights.ckpt', 'config_v3.yaml')      # config の use_v3x で V3/V3X 自動選択
+cf0, uv = NHVVocoder.prep_f0(f0_hz)                       # 0=無声 の生F0 → 連続F0 + uv
+wav = voc.infer(mel, cf0, uv)                            # mel: [T, 128] ln-mel
+```
+
+### F0 抽出について
+
+前処理の F0 は **RMVPE 単体 + 跳躍除外の後処理**（`tools/f0`）を使います。RMVPE のモデル重み `rmvpe.pt`（~173MB）はリポジトリに含めず、**初回実行時に HuggingFace から自動ダウンロード**されます。
+
+### 配布重みのライセンス
+
+配布する学習済み重みは、学習データの都合上 **非商用（non-commercial）** とします。
+
+***
+
+# 以下はレガシー版（NHVSing V1 / NHVSingV2）の説明です
+
+> ⚠️ **ここから下のセクション（音声サンプル・アーキテクチャ・性能・使い方など）は、すべて旧世代 V1 / V2 の内容**です。新規利用は上記の **V3 / V3X（推奨）** を参照してください。V1 / V2 は互換のために残しています。
 
 ## 音声サンプル
 
@@ -35,7 +135,7 @@ NHVSingは単一話者のデータセットで学習することで、その話�
 
 ***
 
-## 性能
+## 性能（V1 / V2）
 
 以下の環境・条件で測定しました。
 
@@ -60,9 +160,9 @@ NHVSingは単一話者のデータセットで学習することで、その話�
 
 ***
 
-## アーキテクチャ
+## アーキテクチャ（V1 / V2）
 
-元の論文の実装から以下の点を変更しています。
+元の論文の実装から以下の点を変更しています。（V3 の disc は MRD + MPD で、下記の MSD + 複素STFT とは別物です）
 
 * **サンプリング周波数**: **44.1kHz**に対応
 * **複素ケプストラム**: 次元数を**512次元**に拡張
@@ -98,7 +198,7 @@ pip install -r requirements.txt
 
 ***
 
-## 使い方
+## 使い方（V1 / V2）
 
 ### NHVSing（V1）の場合
 
@@ -226,7 +326,7 @@ NHVSingV2では学習時に音量を0.5〜2.0倍（log-uniform）でランダム
 ## 課題点
 
 *   **学習プロセス:** 複数のGPUの使用を想定していません。
-*   **他のフレームサイズへの対応:** hop_size=512にすると非常に品質が落ちます。
+*   **フレームサイズ:** V1/V2 は hop_size=512 にすると品質が大きく落ちます。**V3X が hop512 入力に対応**（内部で hop256 へ整列補間）し、この問題を解消しています。
 *   **NHVSing（V1）の話者依存性:** 生成される波形には学習させた話者の特徴が強く反映されます。多話者対応が必要な場合はNHVSingV2を使用してください。
 
 ***
@@ -246,6 +346,23 @@ NHVSingV2では学習時に音量を0.5〜2.0倍（log-uniform）でランダム
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
 
 ## 使用した歌声データベース
+
+### V3
+
+配布するV3のウェイトは以下の非商用データで学習しています。商用利用することはできません。**各データセットのライセンス・入手先・利用条件は、下記リンク先の一次ソースで直接ご確認ください**
+
+*   東北きりたん — [Zunko Project](https://zunko.jp/kiridev/login.php)
+*   夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
+*   波音リツ（Ritsu Singing DB Ver2.0-2.2 / Soft）— [Canon Voice](https://www.canon-voice.com/voicebanks/)
+*   Children's Song Dataset (CSD) — [Zenodo](https://zenodo.org/records/4916302)
+*   NUS-48E — [Zenodo](https://zenodo.org/records/19595152)
+*   御丹宮くるみ（ONIKU_KURUMI うたごえ）— [Onikuru](https://onikuru.info/db-download/)
+*   Opencpop — [WeNet Opencpop](https://wenet-e2e.github.io/opencpop/download/)
+*   No.7 — [VOICE SEVEN](https://voiceseven.com/7dev/login.php)
+*   VocalSet — [Zenodo](https://zenodo.org/records/1193957)
+*   ccmusic-database / acapella — [HuggingFace](https://huggingface.co/datasets/ccmusic-database/acapella)
+
+### V1 / V2（レガシー）
 
 *   東北きりたん — [Zunko Project](https://zunko.jp/kiridev/login.php)
 *   夏目悠李 — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)
