@@ -8,6 +8,8 @@ A [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu
 
 This repository contains the latest **NHVSing V3 / V3X** (recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker).
 
+🎧 **Listen → [NHVSing V3 Demo Page](https://wavtechyukky.github.io/NHVSing/v3.html)** (V3 / V3X vs NSF-HiFiGAN comparison, RTF & model-size figures, singing synthesis from DiffSinger acoustic models)
+
 ***
 
 ## NHVSing V3 / V3X (latest, recommended)

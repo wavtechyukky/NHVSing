@@ -8,6 +8,8 @@
 
 本リポジトリには最新の **NHVSing V3 / V3X**（推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。
 
+🎧 **試聴はこちら → [NHVSing V3 デモページ](https://wavtechyukky.github.io/NHVSing/v3.html)**（V3 / V3X と NSF-HiFiGAN の聴き比べ、RTF・モデルサイズの比較、DiffSinger 音響モデルでの歌声合成）
+
 ***
 
 ## NHVSing V3 / V3X（最新・推奨）
