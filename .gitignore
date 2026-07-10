@@ -26,12 +26,6 @@ exported_models/nsf_hifigan.onnx
 !wav/
 !wav/**
 
-# ...but withhold the entire Natsume Singing DB row from Part A (copy-synthesis).
-# Redistributing the original recording needs the singer's permission (pending), and the
-# V3/V3X/NSF re-synthesis reproduces that same recording — so GT AND re-synthesis are all withheld.
-# (Part B DiffSinger voicebank synthesis under audio_v3/synth/ is a separate matter and is kept.)
-docs/audio_v3/Natsume_Singing_DB_0713_12_0006_*
-
 # Python
 __pycache__/
 *.pyc
