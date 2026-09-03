@@ -125,6 +125,20 @@ def main():
         wav31 = voc.infer(mel, cf0, uv, seed=SEED)
         wav31x = voc_x.infer(mel[::2], cf0[::2], uv[::2], seed=SEED)
 
+        # loudness-match the saved wavs to the GT clip (the model outputs at its
+        # training RMS ~0.111, much quieter than the stored GT/NSF wavs)
+        def match_loudness(w, ref_rms):
+            r = active_rms(w.astype(np.float32))
+            if r > 1e-6:
+                w = w * (ref_rms / r)
+            peak = float(np.abs(w).max())
+            if peak > 0.98:
+                w = w * (0.98 / peak)
+            return w.astype(np.float32)
+
+        rms_gt = active_rms(y.astype(np.float32))
+        wav31 = match_loudness(wav31, rms_gt)
+        wav31x = match_loudness(wav31x, rms_gt)
         sf.write(OUT_DIR / f"{stem}_v31.wav", wav31, sr)
         sf.write(OUT_DIR / f"{stem}_v31x.wav", wav31x, sr)
         y_nsf, _ = sf.read(AUDIO_V3 / f"{stem}_nsf.wav")
