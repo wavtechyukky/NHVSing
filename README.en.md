@@ -6,9 +6,10 @@
 
 A [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf) model **tuned for singing voice synthesis**. Implemented in PyTorch with support for JIT compilation and single-file ONNX export.
 
-This repository contains the latest **NHVSing V3 / V3X** (recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker).
+This repository contains the latest **NHVSing V3 / V3X** (the quality-improved **V3.1 / V3.1X** are recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker).
 
-🎧 **Listen → [NHVSing V3 Demo Page](https://wavtechyukky.github.io/NHVSing/v3.html)** (V3 / V3X vs NSF-HiFiGAN comparison, RTF & model-size figures, singing synthesis from DiffSinger acoustic models)
+🎧 **Listen → [NHVSing V3.1 Demo Page](https://wavtechyukky.github.io/NHVSing/v3_1.html)** (the latest released weights — copy-synthesis vs NSF-HiFiGAN)
+&nbsp;·&nbsp; [V3 Demo Page](https://wavtechyukky.github.io/NHVSing/v3.html) (RTF & model-size figures, singing synthesis from DiffSinger acoustic models)
 
 ***
 
@@ -17,9 +18,9 @@ This repository contains the latest **NHVSing V3 / V3X** (recommended), plus the
 **V3** is the latest model, refined for singing (44.1kHz / hop256 / 128-mel [40–16000Hz, **ln**]). Three essential improvements over V2:
 
 - **Multi-Resolution Discriminator (MRD)** (+ MPD): the single biggest factor in quality. UnivNet-style multi-resolution spectrogram-magnitude discrimination.
-- **Faster impulse-response synthesis (`fft_corr`)**: the LTV-FIR time-correlation is computed via FFT — bit-equivalent to the time-domain version, ~8× faster on CPU.
+- **Faster impulse-response synthesis (`fft_corr`)**: the LTV-FIR uses FFT — bit-equivalent to the time-domain version, ~8× faster on CPU.
 - **Training-data curation & augmentation**: gathered high-quality 44.1 kHz audio and, during training, fed it while randomly varying volume and pitch. Although this feeds the model waveforms that deviate from ordinary ones, it significantly improved the vocoder's generalization.
-- **Cleaner excitation/conditioning**: many measures were tried to raise quality, but the two above had the largest effect, so the configuration was reverted to follow the original paper for now (a major restructuring would likely be V4 or later). White 200-harmonic source / quef_norm α=1.0 / **mel-only input** (F0 embedding removed) / linear F0 interpolation (a return to the original NHV).
+- **Cleaner excitation/conditioning**: many measures were tried to raise quality, but the two above had the largest effect, so the configuration was reverted to follow the original paper for now (a major restructuring would likely be V4 or later). The excitation impulse sums sine waves up to the 200th harmonic / quef_norm α=1.0 / **mel-only input** (F0 embedding removed) / linear F0 interpolation (a return to the original NHV).
 
 **V3X** lets V3 run on **hop512 input**: it takes the hop512 mel/F0 emitted by e.g. OpenUtau, interpolates internally to the hop256 grid, then runs V3 (weights/state_dict shared with V3). This **resolves the "hop512 severely degrades quality" limitation** of V1/V2.
 
@@ -30,11 +31,26 @@ This repository contains the latest **NHVSing V3 / V3X** (recommended), plus the
 | **`NHVSingV3`** | **final model (hop256 native)** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **hop512-input variant of V3** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
+### V3.1 — latest released weights (2026-09)
+
+**V3.1** is V3 retrained with three training fixes. The architecture is unchanged (same classes, same model size, same RTF); what changed is a few bug fixes and how it was trained:
+
+- **float64 excitation phase** (`dsp.py` / `dsp_rebuild/impulse_train_onnx.py`): the impulse-train phase used to be accumulated in float32, which loses precision on long inputs and smears the harmonics. The phase is now accumulated in float64 and folded with mod 1.0 before being handed to a float32 cos (PyTorch and ONNX now compute nearly identically).
+- **Continuous-ratio pitch augmentation** (`train_v3.py`): `torchaudio.resample` only supports rational ratios, so the old augmentation quantized the pitch-shift ratio to 22 discrete steps. Replaced with a continuous-ratio linear-interpolation resample.
+- **Final de-striping phase** (`training.adversarial_end`, new option): the GAN discriminator (MPD+MRD) turned out to paint faint high-frequency stripes onto the spectrogram (strengthening the adversarial loss makes the stripes stronger; stopping the discriminator makes them fade within 10–20 epochs). V3.1 trains 1000 GAN epochs, then finishes with 20 epochs on pure reconstruction losses (mel + STFT + envelope) with the discriminator stopped — removing the stripes without dulling the sound.
+
+Released files in `exported_models/v3_1/` (standard `export.py` outputs, renamed):
+
+- **`nhv_v3_1.pth`** — V3/V3X shared weights
+- **`nhv_v3_1.onnx` / `nhv_v3_1x.onnx`** — self-contained single-file ONNX, same I/O contract as `nhv_v3.onnx` / `nhv_v3x.onnx`
+
+The exact training recipe is **`config_v3_1.yaml`** (a 5-line diff of `config_v3.yaml`; see its header).
+
 ### Performance (V3)
 
 **Model size**: `nhv_v3.onnx` is about **2.2 MB** (no quantization) — roughly **1/26** the size of NSF-HiFiGAN (pc-nsf-hifigan, 56.7 MB), the reference we compare against.
 
-**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an Apple 10-core CPU / ~5 s input / batch 1 / median of 9 runs.
+**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU / ~5 s input / batch 1 / median of 9 runs.
 
 Under ONNX Runtime (CPU), side by side with NSF-HiFiGAN:
 
@@ -64,7 +80,7 @@ The ONNX graph pads the `LTVFirONNX` FFT length to a **power of two** for speed 
 
 ### Usage (V3)
 
-**Preprocess** (F0 = RMVPE only + jump cleaning; `rmvpe.pt` auto-downloads on first run):
+**Preprocess** (F0 = RMVPE alone, plus a post-process that rejects per-frame estimation errors; `rmvpe.pt` auto-downloads on first run):
 ```bash
 python preprocess.py --indir <dir_of_singing_wavs> --out <npz_dir> --config config_v3.yaml
 ```
@@ -104,7 +120,7 @@ Preprocessing F0 uses **RMVPE only + jump-cleaning post-processing** (`tools/f0`
 
 ### Weight licensing
 
-Distributed trained weights are **non-commercial** (due to the training data). Check each dataset's license directly at its original source (listed under *Singing Voice Databases Used* below).
+Distributed trained weights are **non-commercial** (due to the training data).
 
 ***
 
@@ -349,9 +365,9 @@ This repository is based on the following papers and repositories published by L
 
 ## Singing Voice Databases Used
 
-### V3 (distributed weights, non-commercial)
+### V3
 
-The distributed V3 weights are trained on the following non-commercial data. **Please check each dataset's license and terms directly at its original source** (Kiritan / No.7 require SNS account authentication; Opencpop may require contacting the rights holder):
+The distributed V3 weights are trained on the following non-commercial data. Commercial use is not permitted. **Please check each dataset's license, availability and terms directly at the primary sources linked below.**
 
 *   Tohoku Kiritan — [Zunko Project](https://zunko.jp/kiridev/login.php)
 *   Natsume Yuri — [NJKS Official](https://ksdcm1ng.wixsite.com/njksofficial)

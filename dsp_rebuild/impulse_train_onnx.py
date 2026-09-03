@@ -45,6 +45,10 @@ class GenerateImpulseTrainONNX(nn.Module):
         # Only pre-compute this (non-varying parameter)
         multiplier = freq_multiplier_onnx(n_harmonic, torch.float32, torch.device('cpu'))
         self.register_buffer("multiplier", multiplier)
+        # fm/sr を float64 で前計算しておく。位相計算で cumsum(f0) の「後」にこのテンソルを掛けることで、
+        # スカラ (1/sr) を cumsum に掛けた時に ONNX オプティマイザが起こす cumsum(f0/sr) 融合(=小値和で
+        # runtime 間非決定 ~0.047)を防ぐ。cumsum(f0)(大値)は runtime 間でビット一致する。
+        self.register_buffer("mult_over_sr", multiplier.double() / self.sampling_rate)
         
     def forward(self, f0_t: Tensor) -> Tensor:
         """
@@ -74,17 +78,16 @@ class GenerateImpulseTrainONNX(nn.Module):
         #     f0_t.cumsum(dim=-1) * 2.0 * math.pi / sampling_rate *
         #     freq_multiplier(n_harmonic, f0_t.device)
         # )
-        # PyTorch の cumsum は内部で float64 アキュムレータを使用するため、
-        # ONNX Runtime でも同じ精度を再現するために float64 に昇格して cumsum を実行する
-        f0_cumsum = f0_t.to(torch.float64).cumsum(dim=-1).to(torch.float32)
-        w0_map_cum = (
-            f0_cumsum * 2.0 * math.pi / self.sampling_rate * multiplier
-        )
-        
-        # source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
+        # 位相は float64 で cycles を累積 → mod 1.0 で [0,1) へ折り返し → float32 で ×2π → cos。
+        # 旧実装は float64 cumsum の直後に float32 へ戻す no-op(pure float32 と 1bit 一致)で、累積値
+        # (フル長尺で ~1e8, ULP≈10)の丸めにより位相が劣化し倍音間に滲みが出ていた。ONNX Runtime は
+        # Cos(double) 非実装のため、折り返して [0,2π) の小さい値にしてから float32 cos に渡す
+        # (dsp.py::generate_impulse_train と同一計算。位相精度は float64 品質を保つ)。
+        # ★fm/sr は前計算テンソル mult_over_sr を cumsum(f0) の後に掛ける(スカラ 1/sr を cumsum に
+        #   掛けると ONNX が cumsum(f0/sr) に融合し runtime 間で ~0.047 ズレる。cumsum(f0) はビット一致)。
+        cycles = f0_t.to(torch.float64).cumsum(dim=-1) * self.mult_over_sr.to(f0_t.device)
+        w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(torch.float32)
         source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
-        
-        # return source * 0.01
         return source * 0.01
 
 

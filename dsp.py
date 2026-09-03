@@ -47,12 +47,19 @@ def generate_impulse_train(
         f0_t: Tensor, n_harmonic: int,
         sampling_rate: float) -> Tensor:
 
-    f0_map = freq_multiplier(n_harmonic, f0_t.device) * f0_t
-    weight_map = torch.sigmoid(-(f0_map - sampling_rate / 2.0))
-    w0_map_cum = (
-        f0_t.cumsum(dim=-1) * 2.0 * math.pi / sampling_rate *
-        freq_multiplier(n_harmonic, f0_t.device)
-    )
+    fm = freq_multiplier(n_harmonic, f0_t.device)
+    weight_map = torch.sigmoid(-(fm * f0_t - sampling_rate / 2.0))
+    # 位相は float64 で cycles 単位に累積し、mod 1.0 で [0,1) へ折り返してから float32 の cos に渡す。
+    # float32 の cumsum はフル長尺(15s+)で累積値が ~1e8 に達し ULP≈10 まで粗くなって位相が劣化 →
+    # 倍音間に滲み(サイドバンド)が出る。学習は短 crop(cumsum 小)で鋭いのに eval/配備はフル長尺で劣化する
+    # train/deploy 不一致の原因だった。float64 で累積し折り返して精度を確保、cos は [0,2π) の小さい値
+    # なので float32 で十分(ONNX Runtime は Cos(double) 非対応 → ONNX 側と同一計算に統一)。
+    # ★スカラ (1/sr) を cumsum に直接掛けてはいけない: ONNX オプティマイザが cumsum の中へ融合し
+    #   cumsum(f0/sr)(=小値和)になって runtime 間で加算順序依存の非決定性が出る。cumsum(f0)(大値)は
+    #   runtime 間でビット一致するので、fm/sr を float64 テンソルで先に作り cumsum の「後」にテンソル乗算する。
+    # v3.1 の ckpt はこの励起で学習(旧 v3 以前の ckpt もそのまま動く: 変わるのは励起の位相精度のみ)。
+    cycles = f0_t.double().cumsum(dim=-1) * (fm.double() / sampling_rate)
+    w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(f0_t.dtype)
     source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
     return source * 0.01
 

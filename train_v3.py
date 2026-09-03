@@ -16,7 +16,6 @@ matplotlib.use("Agg")
 import matplotlib.pylab as plt
 import soundfile as sf
 import librosa
-import torchaudio.functional as taF
 
 from dataset import VocoderDataset, collate_fn_padd, norm_interp_f0
 from model import NHVSing, NHVSingV2, NHVSingV3, NHVSingV3X, select_model_class
@@ -40,10 +39,17 @@ def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
     r = 2.0 ** (z / 12.0)
     if abs(z) < 1e-3:
         return f0, log_melspc, wav, uv, mask
-    # 1) wav リサンプル(ratio = new/orig = 1/r → 出力長 ≈ Ts/r、バッチ一様)。
-    #    base=100 = cent級・小整数比でカーネル小=高速。ζ∈[-7,2]で ratio≈1近傍。
-    base = 100
-    new_wav = taF.resample(wav, orig_freq=int(round(base * r)), new_freq=base)  # [B, ~Ts/r]
+    # 1) wav リサンプル: 連続倍率で行う(F.interpolate)。torchaudio.resample は有理数 p/q
+    #    しか扱えず、固定 base=100 の22段離散比が縞priorの一因だった——教師データの「固定周波数の線」を
+    #    line×{22比} の櫛に複製し、モデルが高域(12-16kHz)の縞として学習しうる(実測で位置がHz一致)。
+    #    出力長は連続なので実効比 r_actual≈連続=固定線は塗り広げられ櫛化しない。mel も同じ波形から
+    #    再計算するので補間の周波数応答は mel/教師に一貫して乗る→モデルは正しい mel→wav を学び推論クリーン。
+    #    ピッチ×r ⇔ 時間×(1/r) ⇔ 出力長=round(Ts/r)。
+    Ts = wav.shape[-1]
+    Ts_new = max(int(round(Ts / r)), mel_hop * 8)      # 短すぎガード(通常発生しない)
+    new_wav = torch.nn.functional.interpolate(
+        wav.unsqueeze(1), size=Ts_new, mode='linear', align_corners=False).squeeze(1)  # [B, Ts_new]
+    r_actual = Ts / new_wav.shape[-1]                   # ★実際に適用された比。f0 はこれに一致(ラベル=実音)
     Tf_new = new_wav.shape[-1] // mel_hop
     if Tf_new < 8:                                      # 短すぎガード(通常発生しない)
         return f0, log_melspc, wav, uv, mask
@@ -57,7 +63,7 @@ def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
     def _warp(x3, size, mode):
         kw = {'align_corners': False} if mode == 'linear' else {}
         return torch.nn.functional.interpolate(x3, size=size, mode=mode, **kw)
-    new_f0 = _warp(f0.float(), Tf_new, 'linear') * r    # 3) 時間ワープ + ×r(周波数 r倍)
+    new_f0 = _warp(f0.float(), Tf_new, 'linear') * r_actual  # 3) 時間ワープ + 実際の比で f0 を一致(ラベル=実音)
     new_uv = (_warp(uv.float(), Tf_new, 'nearest') > 0.5).float()
     Ts_new = new_wav.shape[-1]                           # = Tf_new * mel_hop
     new_mask = (_warp(mask.float().unsqueeze(1), Ts_new, 'nearest') > 0.5).squeeze(1) \
@@ -807,6 +813,13 @@ def run(args, force_restart: bool = False):
     if harmonic_penalty_scale > 0:
         print(f"harmonic_penalty_scale={harmonic_penalty_scale}, start={harmonic_penalty_start}: unvoiced harmonic penalty enabled")
     adversarial_start = cfg['training']['adversarial_start']
+    # 最終「縞消し」フェーズ: adversarial_end 以降の epoch は D更新も G側 adv/FM も止めて
+    # 純再構成(mel+STFT+envelope)で仕上げる。MPD+MRD が作る高周波の縞は純再構成の
+    # 10-20epoch で消える(v3.1 = 1000ep GAN + 20ep 縞消し)。未指定 = 従来どおり最後まで adversarial。
+    adversarial_end = cfg['training'].get('adversarial_end', None)
+    if adversarial_end is not None:
+        print(f"adversarial_end={adversarial_end}: epoch {int(adversarial_end) + 1} 以降は "
+              f"D停止+純再構成の縞消しフェーズ")
     disc_grad_clip = cfg['training'].get('disc_grad_clip', 1.0)  # disc(MSD)勾配 clip 上限
     disc_grad_clip_grp2 = cfg['training'].get('disc_grad_clip_grp2', disc_grad_clip)  # 第2群(複素STFT/MPD)用
     _disc_has_grp2 = _grp2_module is not None  # ms_stft(複素STFT) or mpd(HiFi-GAN) があれば分離clip可能
@@ -970,7 +983,9 @@ def run(args, force_restart: bool = False):
             # ----------------------------------------------------------------
             # (1) Discriminator update (先)
             # ----------------------------------------------------------------
-            if epoch > adversarial_start:
+            adv_active = (epoch > adversarial_start
+                          and (adversarial_end is None or epoch <= adversarial_end))
+            if adv_active:
                 with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     p_real = discriminator(wav, mel_cond)
                     p_fake = discriminator(est_source.detach(), mel_cond)
@@ -1106,7 +1121,7 @@ def run(args, force_restart: bool = False):
                     total_loss = total_loss + harm_pen * harmonic_penalty_scale / accum_steps
                     del harm_pen, uv_resampled, valid_mask
 
-                if epoch > adversarial_start:
+                if adv_active:
                     discriminator.requires_grad_(False)
                     est_p = discriminator(est_source, mel_cond)
                     with torch.no_grad():

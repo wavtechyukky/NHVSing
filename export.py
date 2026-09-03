@@ -98,6 +98,19 @@ def _export(mod, inputs, path):
     # 「重み内蔵の単一ファイル」にするため、外部データを読み込んで埋め込み再保存し .data を削除。
     import onnx
     m = onnx.load(path, load_external_data=True)
+    # ★プライバシー: dynamo エクスポータは全ノードの metadata_props に
+    #   pkg.torch.onnx.stack_trace(エクスポート環境のローカル絶対パス入りスタックトレース)を
+    #   埋め込む。配布物に環境情報を残さないよう doc_string / metadata_props を全て除去する
+    #   (グラフ意味論には無関係。ORT 照合はこの除去後のファイルに対して行われる)。
+    m.doc_string = ''
+    del m.metadata_props[:]
+    graphs = [m.graph] + [f for f in m.functions]
+    for g in graphs:
+        for n in g.node:
+            n.doc_string = ''
+            del n.metadata_props[:]
+    m.graph.doc_string = ''
+    del m.graph.metadata_props[:]
     onnx.save_model(m, path, save_as_external_data=False)
     if os.path.exists(path + '.data'):
         os.remove(path + '.data')

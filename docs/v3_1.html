@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHVSing V3.1 Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #f8f9fa; color: #212529; line-height: 1.6; }
+    header { background: #1a1a2e; color: #fff; padding: 48px 24px 40px; text-align: center; }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+    header p  { font-size: 1rem; color: #adb5bd; max-width: 820px; margin: 0 auto 8px; }
+    header a  { color: #74c0fc; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    main { max-width: 1400px; margin: 0 auto; padding: 40px 20px 80px; }
+    .intro { background: #fff; border-left: 4px solid #4dabf7; border-radius: 0 8px 8px 0;
+             padding: 18px 22px; margin-bottom: 48px; font-size: 0.95rem; color: #343a40;
+             box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    .intro code { background: #f1f3f5; padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+    section { margin-bottom: 56px; }
+    h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; padding-bottom: 8px;
+         border-bottom: 2px solid #dee2e6; }
+    .section-note { font-size: 0.88rem; color: #6c757d; margin-bottom: 18px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px;
+            overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 8px; }
+    th { background: #343a40; color: #fff; font-size: 0.82rem; font-weight: 600;
+         text-transform: uppercase; letter-spacing: 0.05em; padding: 12px 16px; text-align: center; }
+    th:first-child { text-align: left; }
+    td { padding: 12px 14px; border-bottom: 1px solid #f1f3f5; vertical-align: top; text-align: center; }
+    td:first-child { text-align: left; font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem;
+                     color: #495057; word-break: break-all; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    audio { width: 100%; min-width: 150px; max-width: 360px; height: 34px; }
+    td img { display: block; width: 100%; max-width: 400px; border-radius: 4px; margin-top: 6px; }
+    .m { display: inline-block; font-size: 0.8rem; color: #6c757d; margin-top: 4px; }
+    footer { text-align: center; font-size: 0.82rem; color: #adb5bd; padding: 32px 20px;
+             border-top: 1px solid #dee2e6; }
+    footer a { color: #adb5bd; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>NHVSing V3.1 Demo</h1>
+  <p>V3.1 = V3 retrained with three fixes: float64 excitation phase (no more long-form harmonic smearing), continuous-ratio pitch augmentation, and a final <b>de-striping phase</b> (the GAN discriminator turned out to paint faint high-frequency stripes onto the spectrogram; the last 20 epochs run on pure reconstruction losses with the discriminator frozen, which removes them).</p>
+  <p>
+    <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub Repository</a>
+    &nbsp;·&nbsp;
+    <a href="v3.html">← NHVSing V3 Demo (RTF tables &amp; DiffSinger synthesis)</a>
+  </p>
+</header>
+
+<main>
+
+  <div class="intro">Copy-synthesis of the same held-out validation clips as the <a href="v3.html">V3 demo</a>, re-synthesized with the released <b>V3.1</b> weights (<code>exported_models/v3_1/</code>, 1000 GAN epochs + 20 de-striping epochs). <b>V3.1X receives the mel sub-sampled to the hop-512 grid</b> (the grid OpenUtau / DiffSinger produce) and upsamples it back internally, exactly like the V3X column of the V3 demo. mel-L1 (mean |Δln-mel| against the ground-truth mel; lower = closer) is recomputed here for all three synthesized columns with one measurement, so the numbers are directly comparable within this page — but not to the V3 page. Architecture, model size and RTF are unchanged from V3 (see the <a href="v3.html">V3 page</a> for the efficiency tables).</div>
+
+  <section>
+    <h2>Copy-synthesis (NHVSing V3.1 / V3.1X vs pc-nsf-hifigan)</h2>
+    <p class="section-note">One validation clip per dataset, none included in the training data. Judge by listening — mel-L1 does not match perception.</p>
+    <table><tr><th>segment</th><th>Ground Truth</th><th>NHVSing V3.1</th><th>NHVSing V3.1X</th><th>NSF-HiFiGAN</th></tr>
+<tr><td>1st_color_0000</td><td><audio controls preload="none" src="audio_v3/1st_color_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/1st_color_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/1st_color_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/1st_color_0000_v31_mel.png"><br><span class="m">mel-L1 0.254</span></td><td><audio controls preload="none" src="audio_v3_1/1st_color_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/1st_color_0000_v31x_mel.png"><br><span class="m">mel-L1 0.257</span></td><td><audio controls preload="none" src="audio_v3/1st_color_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/1st_color_0000_nsf_mel.png"><br><span class="m">mel-L1 0.234</span></td></tr>
+<tr><td>20186_0000</td><td><audio controls preload="none" src="audio_v3/20186_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/20186_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/20186_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/20186_0000_v31_mel.png"><br><span class="m">mel-L1 0.299</span></td><td><audio controls preload="none" src="audio_v3_1/20186_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/20186_0000_v31x_mel.png"><br><span class="m">mel-L1 0.301</span></td><td><audio controls preload="none" src="audio_v3/20186_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/20186_0000_nsf_mel.png"><br><span class="m">mel-L1 0.245</span></td></tr>
+<tr><td>CSD_en014b_0002</td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_gt.wav"></audio><br><img class="mel" src="audio_v3_1/CSD_en014b_0002_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/CSD_en014b_0002_v31.wav"></audio><br><img class="mel" src="audio_v3_1/CSD_en014b_0002_v31_mel.png"><br><span class="m">mel-L1 0.285</span></td><td><audio controls preload="none" src="audio_v3_1/CSD_en014b_0002_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/CSD_en014b_0002_v31x_mel.png"><br><span class="m">mel-L1 0.286</span></td><td><audio controls preload="none" src="audio_v3/CSD_en014b_0002_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/CSD_en014b_0002_nsf_mel.png"><br><span class="m">mel-L1 0.236</span></td></tr>
+<tr><td>NUS48E_sing_JTAN_15_0005</td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_gt.wav"></audio><br><img class="mel" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_v31.wav"></audio><br><img class="mel" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_v31_mel.png"><br><span class="m">mel-L1 0.244</span></td><td><audio controls preload="none" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_v31x_mel.png"><br><span class="m">mel-L1 0.244</span></td><td><audio controls preload="none" src="audio_v3/NUS48E_sing_JTAN_15_0005_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/NUS48E_sing_JTAN_15_0005_nsf_mel.png"><br><span class="m">mel-L1 0.224</span></td></tr>
+<tr><td>Natsume_Singing_DB_0713_12_0006</td><td><audio controls preload="none" src="audio_v3/Natsume_Singing_DB_0713_12_0006_gt.wav"></audio><br><img class="mel" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_v31.wav"></audio><br><img class="mel" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_v31_mel.png"><br><span class="m">mel-L1 0.281</span></td><td><audio controls preload="none" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_v31x_mel.png"><br><span class="m">mel-L1 0.282</span></td><td><audio controls preload="none" src="audio_v3/Natsume_Singing_DB_0713_12_0006_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/Natsume_Singing_DB_0713_12_0006_nsf_mel.png"><br><span class="m">mel-L1 0.237</span></td></tr>
+<tr><td>ONIKU_KURUMI_UTAGOE_DB_hato_0000</td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v31_mel.png"><br><span class="m">mel-L1 0.325</span></td><td><audio controls preload="none" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_v31x_mel.png"><br><span class="m">mel-L1 0.327</span></td><td><audio controls preload="none" src="audio_v3/ONIKU_KURUMI_UTAGOE_DB_hato_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/ONIKU_KURUMI_UTAGOE_DB_hato_0000_nsf_mel.png"><br><span class="m">mel-L1 0.264</span></td></tr>
+<tr><td>VocalSet_f8_long_trill_o_0000</td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_v31_mel.png"><br><span class="m">mel-L1 0.294</span></td><td><audio controls preload="none" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_v31x_mel.png"><br><span class="m">mel-L1 0.291</span></td><td><audio controls preload="none" src="audio_v3/VocalSet_f8_long_trill_o_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/VocalSet_f8_long_trill_o_0000_nsf_mel.png"><br><span class="m">mel-L1 0.236</span></td></tr>
+<tr><td>acapella_song2_s02_0024_0000</td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/acapella_song2_s02_0024_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/acapella_song2_s02_0024_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/acapella_song2_s02_0024_0000_v31_mel.png"><br><span class="m">mel-L1 0.319</span></td><td><audio controls preload="none" src="audio_v3_1/acapella_song2_s02_0024_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/acapella_song2_s02_0024_0000_v31x_mel.png"><br><span class="m">mel-L1 0.320</span></td><td><audio controls preload="none" src="audio_v3/acapella_song2_s02_0024_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/acapella_song2_s02_0024_0000_nsf_mel.png"><br><span class="m">mel-L1 0.254</span></td></tr>
+<tr><td>kiritan_singing_09_0006</td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_gt.wav"></audio><br><img class="mel" src="audio_v3_1/kiritan_singing_09_0006_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/kiritan_singing_09_0006_v31.wav"></audio><br><img class="mel" src="audio_v3_1/kiritan_singing_09_0006_v31_mel.png"><br><span class="m">mel-L1 0.321</span></td><td><audio controls preload="none" src="audio_v3_1/kiritan_singing_09_0006_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/kiritan_singing_09_0006_v31x_mel.png"><br><span class="m">mel-L1 0.324</span></td><td><audio controls preload="none" src="audio_v3/kiritan_singing_09_0006_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/kiritan_singing_09_0006_nsf_mel.png"><br><span class="m">mel-L1 0.262</span></td></tr>
+<tr><td>segments_2009000333_0000</td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_gt.wav"></audio><br><img class="mel" src="audio_v3_1/segments_2009000333_0000_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/segments_2009000333_0000_v31.wav"></audio><br><img class="mel" src="audio_v3_1/segments_2009000333_0000_v31_mel.png"><br><span class="m">mel-L1 0.297</span></td><td><audio controls preload="none" src="audio_v3_1/segments_2009000333_0000_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/segments_2009000333_0000_v31x_mel.png"><br><span class="m">mel-L1 0.299</span></td><td><audio controls preload="none" src="audio_v3/segments_2009000333_0000_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/segments_2009000333_0000_nsf_mel.png"><br><span class="m">mel-L1 0.244</span></td></tr>
+<tr><td>wav_O_re_04_0003</td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_gt.wav"></audio><br><img class="mel" src="audio_v3_1/wav_O_re_04_0003_gt_mel.png"></td><td><audio controls preload="none" src="audio_v3_1/wav_O_re_04_0003_v31.wav"></audio><br><img class="mel" src="audio_v3_1/wav_O_re_04_0003_v31_mel.png"><br><span class="m">mel-L1 0.331</span></td><td><audio controls preload="none" src="audio_v3_1/wav_O_re_04_0003_v31x.wav"></audio><br><img class="mel" src="audio_v3_1/wav_O_re_04_0003_v31x_mel.png"><br><span class="m">mel-L1 0.335</span></td><td><audio controls preload="none" src="audio_v3/wav_O_re_04_0003_nsf.wav"></audio><br><img class="mel" src="audio_v3_1/wav_O_re_04_0003_nsf_mel.png"><br><span class="m">mel-L1 0.270</span></td></tr>
+</table>
+  </section>
+
+</main>
+
+<footer>
+  NHVSing V3.1 &nbsp;·&nbsp; <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub</a>
+</footer>
+
+</body>
+</html>

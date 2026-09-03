@@ -6,9 +6,10 @@
 
 [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。
 
-本リポジトリには最新の **NHVSing V3 / V3X**（推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。
+本リポジトリには最新の **NHVSing V3 / V3X**（音質改善版のV3.1・V3.1Xを推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。
 
-🎧 **試聴はこちら → [NHVSing V3 デモページ](https://wavtechyukky.github.io/NHVSing/v3.html)**（V3 / V3X と NSF-HiFiGAN の聴き比べ、RTF・モデルサイズの比較、DiffSinger 音響モデルでの歌声合成）
+🎧 **試聴はこちら → [NHVSing V3.1 デモページ](https://wavtechyukky.github.io/NHVSing/v3_1.html)**（最新の配布重み。NSF-HiFiGANとの copy-synthesis聴き比べ）
+&nbsp;·&nbsp; [V3 デモページ](https://wavtechyukky.github.io/NHVSing/v3.html)（RTF・モデルサイズの比較、DiffSinger音響モデルでの歌声合成）
 
 ***
 
@@ -16,12 +17,12 @@
 
 **V3** は NHV を歌声向けに突き詰めた最新モデルです（44.1kHz / hop256 / 128-mel[40–16000Hz, **ln**]）。V2 からの本質的な改良は3点:
 
-- **MRD (Multi-Resolution Discriminator) の採用**（+ MPD）: 品質向上の最大の要因。UnivNet 系の多解像度スペクトログラム magnitude 判別。
-- **インパルス応答生成の高速化 (`fft_corr`)**: LTV-FIR の時間相関を FFT 化。時間領域版とビット等価で CPU 約8倍速。
+- **MRD (Multi-Resolution Discriminator) の採用**（+ MPD）: 品質向上の最大の要因。UnivNet系の多解像度スペクトログラム magnitude 判別。
+- **インパルス応答生成の高速化 (`fft_corr`)**: LTV-FIRにFFTを使用し、時間領域で処理するバージョンとビット等価で、CPUで約8倍速に。
 - **教師データの選別、水増し**: 44.1kHzの高音質な音声を集め、さらに学習中に音量と音高をランダムに変化させながら与えた。普通の波形から逸脱したものを学習で与えることになりそうだが、ボコーダーの汎化性能はこれで有意に向上した。
-- **励起・条件の整理**: 高音質化を図る対策を沢山講じたが、上の2つの方法の効果が大きく、一旦構成を元論文準拠のものにした。構成を大幅に変えることがあればV4以降になると思われる。白色 200 倍音 / quef_norm α=1.0 / **mel のみ入力**（F0 embedding 廃止）/ F0 は linear 補間（元論文 NHV への回帰）。
+- **励起・条件の整理**: 高音質化を図る対策を沢山講じたが、上の2つの方法の効果が大きく、一旦構成を元論文準拠のものにした。構成を大幅に変えることがあればV4以降になると思われる。励起インパルスは正弦波を200倍音まで加算 / quef_norm α=1.0 / **melのみ入力**（F0 embedding 廃止）/ F0は線形補間（元論文NHVへの回帰）。
 
-**V3X** は V3 を **hop512 入力**で使えるようにした派生です。OpenUtau 等が出す hop512 の mel/F0 を受け、内部で整列中点補間して hop256 グリッドへ戻してから V3 を通します（重み・state_dict は V3 と共有）。**V1/V2 の「hop512 だと品質が大きく落ちる」問題を解消**します。
+**V3X** はV3を **hop512入力**で使えるようにした派生です。OpenUtau等が出すhop512のmel/F0を受け、内部で整列中点補間してhop256グリッドへ戻してからV3を通します（重み・state_dict はV3と共有）。**V1/V2の「hop512だと品質が大きく落ちる」問題を解消**します。
 
 | クラス | 用途 | config |
 |---|---|---|
@@ -30,13 +31,28 @@
 | **`NHVSingV3`** | **最終モデル（hop256 native）** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **V3 の hop512 入力版** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
+### V3.1 — 最新の配布重み（2026-09）
+
+**V3.1** はV3を3つの学習修正つきで再学習したものです。アーキテクチャは不変（クラス・モデルサイズ・RTFは同じ）で、変わったのは一部のバグ修正と学習の仕方です:
+
+- **励起位相のfloat64化**（`dsp.py` / `dsp_rebuild/impulse_train_onnx.py`）: インパルス列の位相をfloat32で累積していたため、長尺で精度が落ちて倍音が滲んでいました。位相をfloat64で累積し、mod 1.0で折り返してからfloat32のcosに渡す方式に変更（PyTorchとONNXでほぼ計算が一致）。
+- **pitch augmentationの連続倍率化**（`train_v3.py`）: `torchaudio.resample` は有理数比しか扱えず、旧実装はピッチシフト倍率が22段階に量子化されていました。連続倍率の線形補間リサンプルに変更。
+- **最終「縞消し」フェーズ**（`training.adversarial_end`・新オプション）: GAN の discriminator（MPD+MRD）がスペクトログラム高域にかすかな縞を描いていたことが判明しました（advを強めると縞が濃くなり、Dを止めると10〜20epochで消える）。V3.1は1000epochのGAN学習のあと、Dを止めて純再構成損失（mel + STFT + envelope）だけで20epoch仕上げ、音を鈍らせずに縞だけを除去しています。
+
+配布ファイルは `exported_models/v3_1/`（標準の `export.py` 出力をリネームしたもの）:
+
+- **`nhv_v3_1.pth`** — V3/V3X 共有の重み
+- **`nhv_v3_1.onnx` / `nhv_v3_1x.onnx`** — 重み内蔵の単一ファイル ONNX（I/O 契約は `nhv_v3.onnx` / `nhv_v3x.onnx` と同一）
+
+学習レシピは **`config_v3_1.yaml`**（`config_v3.yaml` との差分5行。ヘッダ参照）。
+
 ### 性能（V3）
 
-**モデルサイズ**: `nhv_v3.onnx` は **約 2.2 MB**（量子化なし）。比較対象の NSF-HiFiGAN（pc-nsf-hifigan, 56.7 MB）の **約 1/26** です。
+**モデルサイズ**: `nhv_v3.onnx` は **約 2.2 MB**（量子化なし）。比較対象のNSF-HiFiGAN（pc-nsf-hifigan, 56.7MB）の **約1/26** です。
 
-**RTF**（Real-Time Factor = 音声 1 秒あたりの計算秒数。小さいほど速く、< 1 で実時間より速い）。測定環境は Apple 10 コア CPU / 約 5 秒入力 / バッチ 1 / 9 回中央値。
+**RTF**（Real-Time Factor = 音声1秒あたりの計算秒数。小さいほど速く、< 1 で実時間より速い）。測定環境はM4 MacBook Airの10コアCPU / 約5秒入力 / バッチ1 / 9回の中央値。
 
-ONNX Runtime（CPU）で NSF-HiFiGAN と並べると:
+ONNX Runtime（CPU）でNSF-HiFiGANと並べると:
 
 | スレッド数 | NHVSing V3 | NSF-HiFiGAN | NHVSing の速さ |
 |---|---|---|---|
@@ -45,9 +61,9 @@ ONNX Runtime（CPU）で NSF-HiFiGAN と並べると:
 | 4 | 0.062 (16×) | 0.201 (5×) | 3.3× |
 | 8 | 0.063 (16×) | 0.198 (5×) | 3.1× |
 
-**コア数への依存が両者で大きく異なります。** NHVSing V3 は各フレームのインパルス応答生成が完全に独立（*embarrassingly parallel*）ですが、**ONNX Runtime はこの並列性をほとんど活かせず**、実質シングルコア律速です（13×→16× で頭打ち）。一方 NSF-HiFiGAN は大きな転置畳み込みが良く並列化し、コアを増やすほど速くなります（2×→5×）。この結果、**NHVSing の速度優位は低コア環境で最大（〜8×）、多コアでは 〜3× に縮小**しますが、どの条件でも上回ります。
+**コア数への依存が両者で大きく異なります。** NHVSing V3は各フレームのインパルス応答生成が完全に独立（*embarrassingly parallel*）ですが、**ONNX Runtimeはこの並列性をほとんど活かせず**、実質シングルコア律速です（13×→16× で頭打ち）。一方NSF-HiFiGANは大きな転置畳み込みが良く並列化し、コアを増やすほど速くなります（2×→5×）。この結果、**NHVSingの速度優位は低コア環境で最大（〜8×）、多コアでは〜3×に縮小**しますが、どの条件でも上回ります。
 
-**PyTorch（ネイティブ）では並列性が活きます。** 同じ V3 を torch で回すと、per-frame の独立性どおりコア数でスケールします:
+**PyTorch（ネイティブ）では並列性が活きます。** 同じV3をtorchで回すと、per-frameの独立性によりコア数でスケールします:
 
 | スレッド数 | ONNX Runtime | PyTorch |
 |---|---|---|
@@ -56,39 +72,39 @@ ONNX Runtime（CPU）で NSF-HiFiGAN と並べると:
 | 4 | 0.062 (16×) | 0.043 (23×) |
 | 8 | 0.063 (16×) | **0.031 (32×)** |
 
-多コアでは **torch の方が自前 ONNX より速い**（8 スレッドで約 2 倍）という逆転が起きます。極小・FFT 主体のモデルゆえ、ORT のグラフ最適化よりも torch のバッチ FFT 並列化のほうが効くためです。したがって「NHVSing は遅い/速い」は単一の数字では語れず、**ランタイムとコア数の組み合わせで決まります**。
+多コアでは **torchの方が自前ONNXより速い**（8スレッドで約2倍）という逆転が起きます。極小・FFT主体のモデルゆえ、ORTのグラフ最適化よりもtorchのバッチFFT並列化のほうが効くためです。したがって「NHVSingは遅い/速い」は単一の数字では語れず、**ランタイムとコア数の組み合わせで決まります**。
 
-> RTF は計算量のみに依存し、モデルの重み値には依存しません（どの ckpt でも同じ）。
+> RTF は計算量のみに依存し、モデルの重み値には依存しません（どのckptでも同じ）。
 
-ONNX は `LTVFirONNX` の FFT 長を **2 の冪へ pad** して高速化しています（ONNX Runtime の DFT は 2 の冪サイズのみ高速）。V3X も同等です。LTV-FIR の時間相関自体も `fft_corr` で FFT 化済み（時間領域版とビット等価で CPU 約 8 倍速。上記「主な変更点」参照）。
+ONNXは `LTVFirONNX` のFFT長を **2の冪へpad** して高速化しています（ONNX RuntimeのDFTは2の冪サイズのみ高速）。V3Xも同等です。LTV-FIRの時間相関自体も `fft_corr` でFFT化済み（時間領域版とビット等価でCPUで約8倍速。上記「主な変更点」参照）。
 
 ### 使い方（V3）
 
-**前処理**（F0 = RMVPE 単体 + 跳躍除外。初回に `rmvpe.pt` を自動DL）:
+**前処理**（F0 = RMVPE単体で、1フレーム単位の推定誤差を弾く処理を追加。初回に `rmvpe.pt` を自動DL）:
 ```bash
 python preprocess.py --indir <歌唱wavディレクトリ> --out <npz_dir> --config config_v3.yaml
 ```
 
-> **train / test の分け方**: `preprocess.py` は `--out` に全 shard を出力するだけで、train/test の自動振り分けはしません。**wav を学習用・検証用に分けて2回実行**し、それぞれ別ディレクトリへ出力してください（少数の held-out 曲を test に回せば十分）:
+> **train/testの分け方**: `preprocess.py` は `--out` に全 shard を出力するだけで、train/testの自動振り分けはしません。**wavを学習用・検証用に分けて2回実行**し、それぞれ別ディレクトリへ出力してください（少数をtestに回せば十分）:
 > ```bash
 > python preprocess.py --indir wavs/train --out dataset/train --config config_v3.yaml
 > python preprocess.py --indir wavs/eval  --out dataset/test  --config config_v3.yaml
 > ```
-> `config_v3.yaml` の `training.train_dir` / `test_dir` をそれぞれのディレクトリに設定します。`VocoderDataset` は shard（`<sid>|f0` / `|log_melspc` / `|wav`）・単一 segment npz の両方を再帰的に読むので、どちらの形式でも構いません。
+> `config_v3.yaml` の `training.train_dir` / `test_dir` をそれぞれのディレクトリに設定します。`VocoderDataset` はshard（`<sid>|f0` / `|log_melspc` / `|wav`）・単一セグメントのnpzの両方を再帰的に読むので、どちらの形式でも構いません。
 
 **学習**（MRD + MPD GAN。`config_v3.yaml` の `training.train_dir` / `test_dir` / `snapshot_dir` 等を設定）:
 ```bash
 python train_v3.py --config config_v3.yaml
 ```
 
-**ONNX エクスポート**（V3・V3X の両方。3出力: `waveform` / `harmonic` / `noise`）:
+**ONNXエクスポート**（V3・V3Xの両方。3出力: `waveform` / `harmonic` / `noise`）:
 ```bash
 python export.py --config config_v3.yaml --ckpt <weights.ckpt> --out exported_models
 ```
 既定で `exported_models/v3/` に以下を出力します:
 
-- **`nhv_v3.pth`** — V3/V3X 共有の重み（`NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))` でロード可）。**V3X は重みを V3 と共有するので `.pth` は無し**（onnx のみ）。
-- **`nhv_v3.onnx` / `nhv_v3x.onnx`** — 各 **NN + DSP 全部入りの単一 ONNX**（重み内蔵・`.onnx.data` 等の外部ファイル無し・ONNXRuntime のみで推論可能。V1/V2 の `full_vocoder.onnx` と同形式）。入力 `mel` / `f0` / `uv` → 出力 `waveform` / `harmonic` / `noise` の3出力で、`clamp(harmonic + noise) == waveform`。入力長 T は動的（任意長）。
+- **`nhv_v3.pth`** — V3/V3X共有の重み（`NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))` でロード可）。**V3Xは重みをV3と共有するので `.pth` は無し**（onnxのみ）。
+- **`nhv_v3.onnx` / `nhv_v3x.onnx`** — 各 **NN + DSP全部入りの単一ONNX**（重み内蔵・`.onnx.data` 等の外部ファイル無し・ONNXRuntimeのみで推論可能。V1/V2の `full_vocoder.onnx` と同形式）。入力 `mel` / `f0` / `uv` → 出力 `waveform` / `harmonic` / `noise` の3出力で、`clamp(harmonic + noise) == waveform`。入力長Tは動的（任意長）。
 
 **推論（Python）**:
 ```python
@@ -100,7 +116,7 @@ wav = voc.infer(mel, cf0, uv)                            # mel: [T, 128] ln-mel
 
 ### F0 抽出について
 
-前処理の F0 は **RMVPE 単体 + 跳躍除外の後処理**（`tools/f0`）を使います。RMVPE のモデル重み `rmvpe.pt`（~173MB）はリポジトリに含めず、**初回実行時に HuggingFace から自動ダウンロード**されます。
+前処理のF0は **RMVPE 単体 + 跳躍除外の後処理**（`tools/f0`）を使います。RMVPEのモデル重み `rmvpe.pt`（~173MB）はリポジトリに含めず、**初回実行時に HuggingFace から自動ダウンロード**されます。
 
 ### 配布重みのライセンス
 
@@ -173,14 +189,14 @@ NHVSingは単一話者のデータセットで学習することで、その話�
 * **損失関数の追加**:
     * **Envelope loss**: 1D max-poolingで上下包絡を抽出しMAEを計算（RefineGAN §2.5.1）。振幅包絡の不安定化を抑制する（`envelope_scale`）
     * **Harmonic penalty loss**: 無声区間（F0=0のフレーム）で有声成分（`sig_harm`）が出力されることへのL1ペナルティ。無声区間でのブザー音を抑制する（`harmonic_penalty_scale`）
-* **F0入力**: **無声区間を線形補完**したF0を入力とし、Unvoiced/Voicedフラグを不要にした。歌声合成では無声区間も含めてF0カーブを描けることが重要で、UVフラグによる挙動切り替えでは無声→有声のなめらかな推移が再現できない
+* **F0入力**: **無声区間を線形補間**したF0を入力とし、Unvoiced/Voicedフラグを不要にした。歌声合成では無声区間も含めてF0カーブを描けることが重要で、UVフラグによる挙動切り替えでは無声→有声のなめらかな推移が再現できない
 * **logメルスペクトログラム**: **40Hz〜22050Hz**の全帯域を入力とする。高周波数帯の再現度が直感的な品質向上に寄与すると判断した
 
 ### NHVSingV2 固有の変更点
 
 * **Shared trunk CNN** (`use_shared_trunk: true`): HarmonicとNoiseの両ブランチが共有の幹CNNを通ってからそれぞれのヘッドへ分岐する。これによって入力された音響特徴量を、HarmonicとNoiseのどちらを支配的にして生成すべきかを、両者が独立して学習する必要がなくなった。
 * **F0 Embedder** (`use_f0_embed: true`): 連続F0を256ビンのlog₂スケールで離散化し、128次元に埋め込んでメルスペクトログラムと結合する。ネットワークに明示的な音高情報を与えることで、生成すべき一周期分の波形の手がかりが増える。
-* **quef_norm** (`use_quef_norm: true`, `quef_norm_alpha: 0.3`): ケフレンシー成分に1/|n|^αの緩やかなスケーリングをかけ、高次倍音を抑制しすぎずに学習を安定化させる。過去の検証ではオンにすると高周波数帯の阻害されたが、alphaを0.3と小さく設定することで高周波を犠牲にせず安定化できることが確認された
+* **quef_norm** (`use_quef_norm: true`, `quef_norm_alpha: 0.3`): ケフレンシー成分に1/|n|^αの緩やかなスケーリングをかけ、高次倍音を抑制しすぎずに学習を安定化させる。過去の検証ではオンにすると高周波数帯が阻害されたが、alphaを0.3と小さく設定することで高周波を犠牲にせず安定化できることが確認された
 
 ### エクスポート形式
 
