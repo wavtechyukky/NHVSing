@@ -493,7 +493,7 @@ def hann_ltv_fir(
     ``2*frame_size`` and overlaps the analysis frames by 50% before overlap-adding.
     Cross-fading the frame boundaries tapers the filtered spillover of each frame, so
     neighbouring frames can no longer cancel a whole glottal period in anti-phase — this
-    is what removes the high-pitch 1-period dropout ("歯抜け"). For an identity filter the
+    is what removes the high-pitch 1-period dropout. For an identity filter the
     middle of each frame stays transparent (COLA). This is the eager reference that the
     ONNX ``LTVFirONNX(use_hann=True)`` graph is built to match bit-for-bit.
     """

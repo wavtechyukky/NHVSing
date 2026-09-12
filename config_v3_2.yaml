@@ -1,6 +1,6 @@
 # config_v3_2.yaml — training recipe for the V3.2 distributed weights (exported_models/v3_2).
 #
-# V3.2 = V3.1 + a fix for the high-pitch 1-period dropout ("歯抜け") plus a higher-resolution
+# V3.2 = V3.1 + a fix for the high-pitch 1-period dropout plus a higher-resolution
 # reconstruction. Only the deltas from config_v3_1.yaml matter:
 #   - ltv_filter.ola_mode: hann      … Hann WOLA (window 2*hop, 50% overlap). The square OLA lets a
 #                                       frame's filtered spillover cancel a whole glottal period in

@@ -44,7 +44,7 @@
 
 <header>
   <h1>NHVSing V3.2 Demo</h1>
-  <p>V3.2 = V3.1 with the high-pitch <b>1-period dropout</b> ("歯抜け") fixed. The square overlap-add in the LTV filter let a frame's filtered spillover cancel a whole glottal period in anti-phase at high F0; V3.2 replaces it with a <b>Hann WOLA</b> (50% overlap) that tapers the spillover, and the ONNX export matches. Training also randomises the excitation start phase per batch and uses a higher-resolution multi-resolution STFT loss.</p>
+  <p>V3.2 = V3.1 with the high-pitch <b>1-period dropout</b> fixed. The square overlap-add in the LTV filter let a frame's filtered spillover cancel a whole glottal period in anti-phase at high F0; V3.2 replaces it with a <b>Hann WOLA</b> (50% overlap) that tapers the spillover, and the ONNX export matches. Training also randomises the excitation start phase per batch and uses a higher-resolution multi-resolution STFT loss.</p>
   <p>
     <a href="https://github.com/wavtechyukky/NHVSing" target="_blank">GitHub Repository</a>
     &nbsp;·&nbsp;
