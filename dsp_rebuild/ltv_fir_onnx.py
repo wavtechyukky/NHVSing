@@ -18,18 +18,30 @@ class LTVFirONNX(nn.Module):
     Combines frame_signal, fftshift, FFT-based convolution, and OLA (scatter_add)
     into a single module to avoid nested module tracing issues.
     """
-    def __init__(self, frame_size: int, filter_size: int = 0):
+    def __init__(self, frame_size: int, filter_size: int = 0, use_hann: bool = False):
         super().__init__()
         self.frame_size = frame_size
-        # Pre-compute the FFT length for frame_size + filter_size.
+        # use_hann=True: same Hann WOLA (window length 2*frame_size, 50% overlap) as the eager
+        # reference dsp.hann_ltv_fir (plain-PyTorch implementation used as the ground truth).
+        # use_hann=False: legacy square OLA (bit-exact with the old graph). Set this to match
+        # whatever ola_mode the model was trained with (ola_mode: hann -> use_hann=True).
+        self.use_hann = bool(use_hann)
+        # Analysis frame length: square = frame_size (non-overlapping), hann = 2*frame_size (50% overlap).
+        analysis_len = frame_size * 2 if self.use_hann else frame_size
+        # Pre-compute the FFT length for analysis_len + filter_size.
         # ONNX Runtime's DFT op is fast ONLY for powers of two (a non-pow2 length such as
         # 1280 is ~4-8x slower in ORT than 2048). We therefore pad to the next power of two:
         # slightly more samples, but ~2x faster end-to-end in ORT, and bit-exact (FFT is FFT).
         if filter_size > 0:
-            L_min = frame_size + filter_size - 1
+            L_min = analysis_len + filter_size - 1
             self._fast_fft_len = self._next_pow2(L_min)
         else:
             self._fast_fft_len = 0
+        if self.use_hann:
+            # Same as the eager hann_ltv_fir: periodic Hann of length 2*frame_size.
+            # Constant buffer (persistent=False -> not saved into the state_dict).
+            self.register_buffer(
+                'hann_win', torch.hann_window(frame_size * 2, periodic=True), persistent=False)
 
     @staticmethod
     def _next_pow2(n: int) -> int:
@@ -70,16 +82,34 @@ class LTVFirONNX(nn.Module):
         filter_size = filters.size(-1)
 
         # === Step 1: frame_signal (inline) ===
-        # x: [n_batch, 1, n_sample] -> [n_batch, 1, n_sample, 1]
-        x_2d = x.unsqueeze(-1)
-        # unfold: [n_batch, frame_size, n_frame]
-        framed_x = torch.nn.functional.unfold(
-            x_2d,
-            kernel_size=(self.frame_size, 1),
-            stride=(self.frame_size, 1)  # Use frame_size as stride (no overlap)
-        )
-        # transpose: [n_batch, n_frame, frame_size]
-        framed_x = framed_x.transpose(1, 2)
+        if self.use_hann:
+            # Same as eager hann_ltv_fir: pad x by [frame_size, frame_size-1], slice
+            # length-2*frame_size windows at hop=frame_size (50% overlap), then multiply the
+            # periodic Hann window. The OLA hop stays frame_size (same as square), so a
+            # constant/identity filter is transparent in the middle (COLA=1); frame-boundary
+            # steps are cross-faded and the filtered spillover is tapered at the edges
+            # (this is what removes the high-pitch 1-period dropout).
+            wl = self.frame_size
+            wr = self.frame_size - 1
+            x = torch.nn.functional.pad(x, [wl, wr])
+            ws = self.frame_size * 2
+            x_2d = x.unsqueeze(-1)
+            framed_x = torch.nn.functional.unfold(
+                x_2d, kernel_size=(ws, 1), stride=(self.frame_size, 1))   # [B, ws, n_frame]
+            framed_x = framed_x.transpose(1, 2)                            # [B, n_frame, ws]
+            framed_x = framed_x * self.hann_win.to(framed_x.dtype)
+        else:
+            # Legacy square OLA: non-overlapping frame_size frames.
+            # x: [n_batch, 1, n_sample] -> [n_batch, 1, n_sample, 1]
+            x_2d = x.unsqueeze(-1)
+            # unfold: [n_batch, frame_size, n_frame]
+            framed_x = torch.nn.functional.unfold(
+                x_2d,
+                kernel_size=(self.frame_size, 1),
+                stride=(self.frame_size, 1)  # Use frame_size as stride (no overlap)
+            )
+            # transpose: [n_batch, n_frame, frame_size]
+            framed_x = framed_x.transpose(1, 2)
 
         # === Step 2: fftshift (inline) ===
         split_point = (filter_size + 1) // 2
@@ -133,7 +163,9 @@ class LTVFirONNX(nn.Module):
         y = output.scatter_add(2, indices_flat, framed_z_flat)
 
         # === Step 5: Slice to match original n_sample ===
-        start_slice = filter_size // 2
+        # square: filter_size//2 (same as eager ltv_fir).
+        # hann: same as eager hann_ltv_fir's [filter_size//2 + wl : ...] (wl = frame_size left pad).
+        start_slice = filter_size // 2 + (self.frame_size if self.use_hann else 0)
         # The output length of striped_y should match n_sample, so we slice exactly that many samples
         striped_y = y.narrow(2, start_slice, n_sample)
         

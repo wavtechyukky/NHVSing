@@ -5,7 +5,7 @@ from torch.nn.utils import parametrize, parametrizations
 from onnx_model import NHVConvsONNX, NHVConvsShared
 from layers import F0Embedder
 from dsp import (generate_impulse_train, generate_impulse_train_v3beta,
-                 complex_cepstrum_to_imp, ltv_fir)
+                 complex_cepstrum_to_imp, ltv_fir, hann_ltv_fir)
 
 
 def repeat_interpolate(x: torch.Tensor, frame_size: int) -> torch.Tensor:
@@ -303,9 +303,20 @@ class NHVSingV3(nn.Module):
 
         self.convs_onnx = NHVConvsShared(ltv_params)      # quef_norm は config(α=1.0)
         self.impulse_generator = generate_impulse_train    # 白色 200 倍音
+        # ola_mode: 'hann' -> Hann WOLA (hann_ltv_fir; removes the high-pitch 1-period dropout).
+        # anything else -> legacy square OLA (ltv_fir; bit-identical to the old graph).
+        self.ltv_ola_mode = ltv_filter_cfg.get('ola_mode', 'square')
+        # train-only: randomise the impulse start phase per batch (default False; eval/ONNX = phase 0).
+        self.excit_phase_jitter = bool(vocoder_cfg.get('excit_phase_jitter', False))
 
         if vocoder_cfg.get('use_weight_norm', True):
             self._apply_weight_norm()
+
+    def _ltv(self, source, ccep, fft_size):
+        """Dispatch the OLA mode via self.ltv_ola_mode: 'hann' -> Hann WOLA, else square (ltv_fir)."""
+        if self.ltv_ola_mode == 'hann':
+            return hann_ltv_fir(source, complex_cepstrum_to_imp(ccep, fft_size), self.hop_size)
+        return ltv_fir(source, complex_cepstrum_to_imp(ccep, fft_size), self.hop_size)
 
     def _forward_impl(self, x, cf0, uv, no_dsp_grad: bool = False, noise_std: float = -1.0,
                       harmonic_gain: float = 1.0, noise_gain: float = 1.0):
@@ -320,12 +331,17 @@ class NHVSingV3(nn.Module):
             ccep_noise = ccep_noise.detach()
 
         cf0_resampled   = upsample_f0(cf0, self.hop_size, self.f0_upsample)
-        harmonic_source = self.impulse_generator(cf0_resampled, self.n_harmonic, float(self.fs))
+        # train-only per-batch random start phase u in [0,1) injected into the excitation
+        # (eval/ONNX -> None -> phase 0, so the exported graph is unaffected).
+        start_phase = None
+        if self.training and self.excit_phase_jitter:
+            start_phase = torch.rand(x.size(0), 1, 1, device=x.device, dtype=cf0_resampled.dtype)
+        harmonic_source = self.impulse_generator(cf0_resampled, self.n_harmonic, float(self.fs), start_phase)
         voiced_resampled = repeat_interpolate((1.0 - uv), self.hop_size)   # hard v/uv gate(ZOH)
         harmonic_source  = harmonic_source * voiced_resampled
 
-        sig_harm  = ltv_fir(harmonic_source, complex_cepstrum_to_imp(ccep_harm,  self.fft_size_harm),  self.hop_size)
-        sig_noise = ltv_fir(z,               complex_cepstrum_to_imp(ccep_noise, self.fft_size_noise), self.hop_size)
+        sig_harm  = self._ltv(harmonic_source, ccep_harm,  self.fft_size_harm)
+        sig_noise = self._ltv(z,               ccep_noise, self.fft_size_noise)
 
         y = torch.clamp(harmonic_gain * sig_harm + noise_gain * sig_noise, -1, 1)
         return y.reshape(x.size(0), -1), sig_harm, sig_noise

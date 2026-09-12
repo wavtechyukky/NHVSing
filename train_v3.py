@@ -71,12 +71,19 @@ def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
     return new_f0, new_mel, new_wav, new_uv, new_mask
 
 
-def make_random_crop_collate(crop_frames, hop_size: int):
+def make_random_crop_collate(crop_frames, hop_size: int, min_crop_rms: float = 0.0,
+                             max_crop_tries: int = 10):
     """NSF-HiFiGAN 流の固定長ランダムクロップ。各 item を crop_frames フレーム
     (= crop_frames*hop_size sample)に frame0 整列でランダム切り出し。短い item は
     末尾ゼロパディング。全 item 同一長になるので collate_fn_padd は無パディング=mask 全 False
     (下流の RMS/masked_fill は no-op)。head-crop だった make_capped_collate を置換。
-    __getitem__ 返り値: f0[1,T], mel[T,n_mels], wav[T*hop], uv[1,T]。"""
+    __getitem__ 返り値: f0[1,T], mel[T,n_mels], wav[T*hop], uv[1,T]。
+
+    min_crop_rms > 0 rejects near-silent crops by re-drawing the start position (default 0 = off, so
+    v3/v3.1 configs without the key behave exactly as before). Per-utterance RMS normalisation
+    downstream scales the source by 1/rms, so an rms~0 crop blows up the STFT-loss gradient; we redraw
+    up to max_crop_tries times and take the first crop with rms >= min_crop_rms, falling back to the
+    loudest candidate if all fail (the item is never dropped)."""
     if crop_frames is None:
         return collate_fn_padd
 
@@ -93,8 +100,24 @@ def make_random_crop_collate(crop_frames, hop_size: int):
                 melspc = np.pad(melspc, ((0, pad_f), (0, 0)))
                 wav = np.pad(wav, (0, crop_samples - wav.shape[0]))
                 s = 0
-            else:
+            elif min_crop_rms <= 0.0:
                 s = np.random.randint(0, T - crop_frames + 1)
+            else:
+                # Reject near-silent crops: take the first crop with rms >= min_crop_rms; if all
+                # max_crop_tries draws fail, keep the loudest candidate (never drop the item).
+                s = np.random.randint(0, T - crop_frames + 1)
+                best_s, best_rms = s, -1.0
+                for _ in range(max_crop_tries):
+                    ss = s * hop_size
+                    seg = wav[ss:ss + crop_samples]
+                    rms = float(np.sqrt(np.mean(seg.astype(np.float64) ** 2))) if seg.size else 0.0
+                    if rms >= min_crop_rms:
+                        best_s = s
+                        break
+                    if rms > best_rms:
+                        best_s, best_rms = s, rms
+                    s = np.random.randint(0, T - crop_frames + 1)
+                s = best_s
             e = s + crop_frames
             ss = s * hop_size
             se = ss + crop_samples
@@ -697,7 +720,8 @@ def run(args, force_restart: bool = False):
                                    augment=amp_augment, amp_aug_range=amp_aug_range,
                                    diffsinger_mel=use_v3)
     crop_frames = cfg['training'].get('crop_frames', cfg['training'].get('max_train_frames', None))
-    collate_train = make_random_crop_collate(crop_frames, hop_size=hop_size)
+    min_crop_rms = float(cfg['training'].get('min_crop_rms', 0.0))   # 0 = disabled (near-silent crop rejection)
+    collate_train = make_random_crop_collate(crop_frames, hop_size=hop_size, min_crop_rms=min_crop_rms)
     if crop_frames:
         print(f"crop_frames={crop_frames}: NSF流ランダム固定長クロップ ({crop_frames * hop_size} samp)")
 

@@ -49,7 +49,10 @@ class FullVocoderV3(nn.Module):
         self.impulse_train = GenerateImpulseTrainONNX(int(vocoder_cfg.get('n_harmonic', 200)),
                                                       vocoder_cfg['sample_rate'])
         self.ccep_to_imp = ComplexCepstrumToImpONNX(ltv_filter_cfg['fft_size'], use_float64=False)
-        self.ltv_fir     = LTVFirONNX(self.hop_size, filter_size=ltv_filter_cfg['fft_size'])  # pow2 pad 済
+        # ola_mode: 'hann' selects Hann WOLA (matches the training-side eager hann_ltv_fir),
+        # anything else keeps the legacy square OLA. pow2-FFT padding is applied either way.
+        use_hann = ltv_filter_cfg.get('ola_mode', 'square') == 'hann'
+        self.ltv_fir     = LTVFirONNX(self.hop_size, filter_size=ltv_filter_cfg['fft_size'], use_hann=use_hann)  # pow2 pad 済
 
     def forward(self, mel, f0, uv):
         ccep_harm, ccep_noise = self.nn_core(mel)

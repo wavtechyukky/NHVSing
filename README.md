@@ -6,9 +6,9 @@
 
 [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。
 
-本リポジトリには最新の **NHVSing V3 / V3X**（音質改善版のV3.1・V3.1Xを推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。
+本リポジトリには最新の **NHVSing V3 / V3X**（音質改善版のV3.2・V3.2Xを推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。V3.1は特定の周波数で、フレーム単位で波形の位相が反転し、隣接するフレームの波形を打ち消す動作が起こっていたため非推奨です。
 
-🎧 **試聴はこちら → [NHVSing V3.1 デモページ](https://wavtechyukky.github.io/NHVSing/v3_1.html)**（最新の配布重み。NSF-HiFiGANとの copy-synthesis聴き比べ）
+🎧 **試聴はこちら → [NHVSing V3.2 デモページ](https://wavtechyukky.github.io/NHVSing/v3_2.html)**（最新の配布ウェイト。NSF-HiFiGANとの copy-synthesis聴き比べ）
 &nbsp;·&nbsp; [V3 デモページ](https://wavtechyukky.github.io/NHVSing/v3.html)（RTF・モデルサイズの比較、DiffSinger音響モデルでの歌声合成）
 
 ***
@@ -31,20 +31,27 @@
 | **`NHVSingV3`** | **最終モデル（hop256 native）** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **V3 の hop512 入力版** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
-### V3.1 — 最新の配布重み（2026-09）
+> V3.2 も同じ `NHVSingV3` / `NHVSingV3X` を使い、config だけ **`config_v3_2.yaml`**（`ltv_filter.ola_mode: hann`）に差し替えます。
 
-**V3.1** はV3を3つの学習修正つきで再学習したものです。アーキテクチャは不変（クラス・モデルサイズ・RTFは同じ）で、変わったのは一部のバグ修正と学習の仕方です:
+### V3.2 — 最新の配布ウェイト（2026-09）
 
-- **励起位相のfloat64化**（`dsp.py` / `dsp_rebuild/impulse_train_onnx.py`）: インパルス列の位相をfloat32で累積していたため、長尺で精度が落ちて倍音が滲んでいました。位相をfloat64で累積し、mod 1.0で折り返してからfloat32のcosに渡す方式に変更（PyTorchとONNXでほぼ計算が一致）。
-- **pitch augmentationの連続倍率化**（`train_v3.py`）: `torchaudio.resample` は有理数比しか扱えず、旧実装はピッチシフト倍率が22段階に量子化されていました。連続倍率の線形補間リサンプルに変更。
-- **最終「縞消し」フェーズ**（`training.adversarial_end`・新オプション）: GAN の discriminator（MPD+MRD）がスペクトログラム高域にかすかな縞を描いていたことが判明しました（advを強めると縞が濃くなり、Dを止めると10〜20epochで消える）。V3.1は1000epochのGAN学習のあと、Dを止めて純再構成損失（mel + STFT + envelope）だけで20epoch仕上げ、音を鈍らせずに縞だけを除去しています。
+**V3.2** のV3からの変更点は以下のとおりです。アーキテクチャは不変（クラス・モデルサイズ・RTFは同じ）で、変わったのは一部のバグ修正と学習の仕方です:
 
-配布ファイルは `exported_models/v3_1/`（標準の `export.py` 出力をリネームしたもの）:
+- **LTVフィルタの生成波形にHann窓をかけた（Hann WOLA・50%重複）**: フレーム単位で急激に波形が弱まる現象の主因は、時変FIRを矩形窓の非重複OLAで畳んでいたため、あるフレームの畳み込み波形が隣フレームへ大振幅ではみ出し、隣フレームがそれを180°逆位相で打ち消していたことでした。窓を2×frame_sizeのHann窓に変えてはみ出しを境界でテーパーし、波形の重複を実質4回から2回分の強度に変更しました。急峻なmelの変化があった場合に近接フレームの波形が重なり、melと波形が不整合になることを低減する狙いもあります。配布ONNX（`export.py`→`LTVFirONNX`）も同時にHann窓化しており、学習と配布で計算が一致します。
+- **励起位相のfloat64化**: インパルス列の位相をfloat32で累積していたため、長尺で精度が落ちて倍音が滲んでいました。位相をfloat64で累積し、mod 1.0で折り返してからfloat32のcosに渡す方式に変更（PyTorchとONNXでほぼ計算が一致）。
+- **pitch augmentationの連続倍率化**: `torchaudio.resample` は有理数比しか扱えず、旧実装はピッチシフト倍率が22段階に量子化されていました。連続倍率の線形補間リサンプルに変更。
+- **訓練中の励起インパルスの開始タイミングのランダム化**: V3.1で瞬間的にインパルス応答の位相が反転し、隣接するフレームの波形を打ち消してしまう動作が起こったため、局所的に特定の位相に偏る学習が行われないことを目的に機能を追加しました。
+- **多重解像度STFT損失の短時間の解像度のウィンドウ追加**: これも上と同様、V3.1で起こった隣接するフレームの波形を打ち消す動作の対策として追加しました。元の解像度では1フレームの波形の弱まりを検知できないことが分かったためです。
+- **低学習率の仕上げのステップを追加**: 過学習しないよう早めに学習を切り上げつつ、melの再現度を高めるように追加しました。
 
-- **`nhv_v3_1.pth`** — V3/V3X 共有の重み
-- **`nhv_v3_1.onnx` / `nhv_v3_1x.onnx`** — 重み内蔵の単一ファイル ONNX（I/O 契約は `nhv_v3.onnx` / `nhv_v3x.onnx` と同一）
+> ※「励起位相のfloat64化」と「pitch augmentation の連続倍率化」は元々 **V3.1** で入れた修正で、V3.2 にも引き継いでいます。V3.2 で新規に加えたのは Hann窓化・励起位相のランダム化・STFT の短時間ウィンドウ追加・低学習率の仕上げです。
 
-学習レシピは **`config_v3_1.yaml`**（`config_v3.yaml` との差分5行。ヘッダ参照）。
+配布ファイルは `exported_models/v3_2/`（標準の `export.py` 出力をリネームしたもの）:
+
+- **`nhv_v3_2.pth`** — V3/V3X 共有の重み
+- **`nhv_v3_2.onnx` / `nhv_v3_2x.onnx`** — 重み内蔵の単一ファイル ONNX（I/O 契約は `nhv_v3.onnx` / `nhv_v3x.onnx` と同一）
+
+学習レシピは **`config_v3_2.yaml`**。
 
 ### 性能（V3）
 
@@ -105,6 +112,8 @@ python export.py --config config_v3.yaml --ckpt <weights.ckpt> --out exported_mo
 
 - **`nhv_v3.pth`** — V3/V3X共有の重み（`NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))` でロード可）。**V3Xは重みをV3と共有するので `.pth` は無し**（onnxのみ）。
 - **`nhv_v3.onnx` / `nhv_v3x.onnx`** — 各 **NN + DSP全部入りの単一ONNX**（重み内蔵・`.onnx.data` 等の外部ファイル無し・ONNXRuntimeのみで推論可能。V1/V2の `full_vocoder.onnx` と同形式）。入力 `mel` / `f0` / `uv` → 出力 `waveform` / `harmonic` / `noise` の3出力で、`clamp(harmonic + noise) == waveform`。入力長Tは動的（任意長）。
+
+> **V3.2** を出力するときは `--config config_v3_2.yaml` を指定し、出力された `nhv_v3.*` を `nhv_v3_2.*` にリネームします（配布物 `exported_models/v3_2/` はこの手順で作成）。
 
 **推論（Python）**:
 ```python

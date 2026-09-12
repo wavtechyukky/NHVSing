@@ -6,9 +6,9 @@
 
 A [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf) model **tuned for singing voice synthesis**. Implemented in PyTorch with support for JIT compilation and single-file ONNX export.
 
-This repository contains the latest **NHVSing V3 / V3X** (the quality-improved **V3.1 / V3.1X** are recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker).
+This repository contains the latest **NHVSing V3 / V3X** (the quality-improved **V3.2 / V3.2X** are recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker). V3.1 is deprecated: at certain frequencies it exhibited a per-frame waveform phase flip in which a frame's waveform was cancelled by the neighbouring frame.
 
-🎧 **Listen → [NHVSing V3.1 Demo Page](https://wavtechyukky.github.io/NHVSing/v3_1.html)** (the latest released weights — copy-synthesis vs NSF-HiFiGAN)
+🎧 **Listen → [NHVSing V3.2 Demo Page](https://wavtechyukky.github.io/NHVSing/v3_2.html)** (the latest released weights — copy-synthesis vs NSF-HiFiGAN)
 &nbsp;·&nbsp; [V3 Demo Page](https://wavtechyukky.github.io/NHVSing/v3.html) (RTF & model-size figures, singing synthesis from DiffSinger acoustic models)
 
 ***
@@ -31,20 +31,27 @@ This repository contains the latest **NHVSing V3 / V3X** (the quality-improved *
 | **`NHVSingV3`** | **final model (hop256 native)** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **hop512-input variant of V3** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
-### V3.1 — latest released weights (2026-09)
+> V3.2 uses the same `NHVSingV3` / `NHVSingV3X` classes; only the config changes to **`config_v3_2.yaml`** (`ltv_filter.ola_mode: hann`).
 
-**V3.1** is V3 retrained with three training fixes. The architecture is unchanged (same classes, same model size, same RTF); what changed is a few bug fixes and how it was trained:
+### V3.2 — latest released weights (2026-09)
 
-- **float64 excitation phase** (`dsp.py` / `dsp_rebuild/impulse_train_onnx.py`): the impulse-train phase used to be accumulated in float32, which loses precision on long inputs and smears the harmonics. The phase is now accumulated in float64 and folded with mod 1.0 before being handed to a float32 cos (PyTorch and ONNX now compute nearly identically).
-- **Continuous-ratio pitch augmentation** (`train_v3.py`): `torchaudio.resample` only supports rational ratios, so the old augmentation quantized the pitch-shift ratio to 22 discrete steps. Replaced with a continuous-ratio linear-interpolation resample.
-- **Final de-striping phase** (`training.adversarial_end`, new option): the GAN discriminator (MPD+MRD) turned out to paint faint high-frequency stripes onto the spectrogram (strengthening the adversarial loss makes the stripes stronger; stopping the discriminator makes them fade within 10–20 epochs). V3.1 trains 1000 GAN epochs, then finishes with 20 epochs on pure reconstruction losses (mel + STFT + envelope) with the discriminator stopped — removing the stripes without dulling the sound.
+**V3.2** is the successor to V3 (V3.1 is deprecated). The architecture is unchanged (same classes, same model size, same RTF); what changed is a few fixes and how it was trained:
 
-Released files in `exported_models/v3_1/` (standard `export.py` outputs, renamed):
+- **Hann window on the LTV-filter output (Hann WOLA, 50% overlap)**: the main cause of the per-frame sudden waveform attenuation was that the time-varying FIR was overlap-added with a non-overlapping rectangular window, so a frame's convolved waveform spilled into the neighbouring frame at large amplitude and the neighbour cancelled it 180° out of phase. Switching to a Hann window of length 2×frame_size tapers the spillover at the boundaries and reduces the effective waveform overlap from four frames down to the strength of two. It also lessens the mel/waveform mismatch when adjacent frames' waveforms overlap under a steep mel change. The released ONNX (`export.py` → `LTVFirONNX`) is Hann-windowed too, so training and deployment compute identically.
+- **float64 excitation phase**: the impulse-train phase used to be accumulated in float32, which loses precision on long inputs and smears the harmonics. The phase is now accumulated in float64 and folded with mod 1.0 before being handed to a float32 cos (PyTorch and ONNX compute nearly identically).
+- **Continuous-ratio pitch augmentation**: `torchaudio.resample` only supports rational ratios, so the old augmentation quantized the pitch-shift ratio to 22 discrete steps. Replaced with a continuous-ratio linear-interpolation resample.
+- **Randomised excitation start phase during training**: because V3.1 momentarily flipped the impulse-response phase and cancelled the neighbouring frame's waveform, this was added so the model does not learn to lock onto a specific local phase.
+- **An extra short-window resolution in the multi-resolution STFT loss**: likewise a countermeasure for the neighbour-cancellation seen in V3.1 — the original resolutions could not detect a single frame's waveform attenuation.
+- **A low-learning-rate finishing pass**: added to raise mel fidelity while still stopping training early enough to avoid over-fitting.
 
-- **`nhv_v3_1.pth`** — V3/V3X shared weights
-- **`nhv_v3_1.onnx` / `nhv_v3_1x.onnx`** — self-contained single-file ONNX, same I/O contract as `nhv_v3.onnx` / `nhv_v3x.onnx`
+> Note: "float64 excitation phase" and "continuous-ratio pitch augmentation" were originally introduced in **V3.1** and carried over into V3.2. What is new in V3.2 is the Hann windowing, the randomised excitation start phase, the extra short STFT window, and the low-LR finishing pass.
 
-The exact training recipe is **`config_v3_1.yaml`** (a 5-line diff of `config_v3.yaml`; see its header).
+Released files in `exported_models/v3_2/` (standard `export.py` outputs, renamed):
+
+- **`nhv_v3_2.pth`** — V3/V3X shared weights
+- **`nhv_v3_2.onnx` / `nhv_v3_2x.onnx`** — self-contained single-file ONNX, same I/O contract as `nhv_v3.onnx` / `nhv_v3x.onnx`
+
+The exact training recipe is **`config_v3_2.yaml`**.
 
 ### Performance (V3)
 
@@ -105,6 +112,8 @@ By default this writes to `exported_models/v3/`:
 
 - **`nhv_v3.pth`** — shared weights for V3/V3X (load with `NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))`). **V3X shares these weights, so it has no `.pth`** (ONNX only).
 - **`nhv_v3.onnx` / `nhv_v3x.onnx`** — each a **single self-contained ONNX** (NN + DSP, weights embedded — no external `.onnx.data`; runnable with ONNX Runtime alone, same format as V1/V2's `full_vocoder.onnx`). Inputs `mel` / `f0` / `uv` → 3 outputs `waveform` / `harmonic` / `noise`, with `clamp(harmonic + noise) == waveform`. The time length T is dynamic (any length).
+
+> To export **V3.2**, pass `--config config_v3_2.yaml` and rename the resulting `nhv_v3.*` to `nhv_v3_2.*` (the released `exported_models/v3_2/` was built this way).
 
 **Inference (Python)**:
 ```python

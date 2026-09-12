@@ -45,7 +45,7 @@ def freq_multiplier(n_harmonic: int, device: torch.device) -> Tensor:
 @torch.jit.script
 def generate_impulse_train(
         f0_t: Tensor, n_harmonic: int,
-        sampling_rate: float) -> Tensor:
+        sampling_rate: float, start_phase: Optional[Tensor] = None) -> Tensor:
 
     fm = freq_multiplier(n_harmonic, f0_t.device)
     weight_map = torch.sigmoid(-(fm * f0_t - sampling_rate / 2.0))
@@ -59,6 +59,13 @@ def generate_impulse_train(
     #   runtime 間でビット一致するので、fm/sr を float64 テンソルで先に作り cumsum の「後」にテンソル乗算する。
     # v3.1 の ckpt はこの励起で学習(旧 v3 以前の ckpt もそのまま動く: 変わるのは励起の位相精度のみ)。
     cycles = f0_t.double().cumsum(dim=-1) * (fm.double() / sampling_rate)
+    # Train-only: randomise the impulse-train start phase (default None = phase 0, identical to the
+    # old behaviour and to the ONNX graph). start_phase u in [0,1) is a fractional phase of the
+    # fundamental period, so harmonic k is shifted by fm[k]*u cycles. Fixing the phase at 0 (GCI at
+    # t=0) lets the CNN memorise a specific-phase ccep -> a cause of the high-pitch dropout; jittering
+    # it per batch during training encourages a phase-independent filter.
+    if start_phase is not None:
+        cycles = cycles + fm.double() * start_phase.double()
     w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(f0_t.dtype)
     source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
     return source * 0.01
@@ -475,6 +482,32 @@ def ltv_fir(
     y = _framewise_corr_ola(framed_x, filters, frame_size, method)
     striped_y = y[..., filter_size // 2: n_sample + filter_size // 2]
     return striped_y
+
+
+def hann_ltv_fir(
+    x: Tensor, filters: Tensor, frame_size: int, method: str = "fft"
+) -> Tensor:
+    """Linear time-varying FIR filter applied with a Hann WOLA (50% overlap).
+
+    Unlike the square-OLA ``ltv_fir``, this uses a periodic Hann window of length
+    ``2*frame_size`` and overlaps the analysis frames by 50% before overlap-adding.
+    Cross-fading the frame boundaries tapers the filtered spillover of each frame, so
+    neighbouring frames can no longer cancel a whole glottal period in anti-phase — this
+    is what removes the high-pitch 1-period dropout ("歯抜け"). For an identity filter the
+    middle of each frame stays transparent (COLA). This is the eager reference that the
+    ONNX ``LTVFirONNX(use_hann=True)`` graph is built to match bit-for-bit.
+    """
+    ws = frame_size * 2
+    window = torch.hann_window(ws, periodic=True, dtype=x.dtype, device=x.device)
+    filter_size = filters.size(-1)
+    n_sample = x.size(-1)
+    wl = ws // 2
+    wr = ws - wl - 1
+    padded = pad(x, [wl, wr])
+    framed = frame_signal(padded, ws, frame_size).transpose(-1, -2) * window
+    filters = fftshift(filters, dim=-1)
+    y = _framewise_corr_ola(framed, filters, frame_size, method)
+    return y[..., filter_size // 2 + wl: n_sample + filter_size // 2 + wl]
 
 
 
