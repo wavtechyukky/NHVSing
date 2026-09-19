@@ -105,15 +105,26 @@ def _export(mod, inputs, path):
     #   pkg.torch.onnx.stack_trace(エクスポート環境のローカル絶対パス入りスタックトレース)を
     #   埋め込む。配布物に環境情報を残さないよう doc_string / metadata_props を全て除去する
     #   (グラフ意味論には無関係。ORT 照合はこの除去後のファイルに対して行われる)。
+    #   ★サブグラフ(Scan/Loop/If の body)へ**再帰**すること。トップレベルの node だけ消すと、
+    #     制御フローの中に入ったノードのスタックトレースが残る(2026-09: Scan 導入で実際に
+    #     488 箇所のローカル絶対パスが配布物へ混入しかけた)。
     m.doc_string = ''
     del m.metadata_props[:]
-    graphs = [m.graph] + [f for f in m.functions]
-    for g in graphs:
+
+    def _strip(g):
+        g.doc_string = ''
+        del g.metadata_props[:]
         for n in g.node:
             n.doc_string = ''
             del n.metadata_props[:]
-    m.graph.doc_string = ''
-    del m.graph.metadata_props[:]
+            for a in n.attribute:
+                if a.HasField('g'):
+                    _strip(a.g)
+                for sub in a.graphs:
+                    _strip(sub)
+
+    for g in [m.graph] + list(m.functions):
+        _strip(g)
     onnx.save_model(m, path, save_as_external_data=False)
     if os.path.exists(path + '.data'):
         os.remove(path + '.data')

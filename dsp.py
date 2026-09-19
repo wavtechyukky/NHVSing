@@ -45,7 +45,38 @@ def freq_multiplier(n_harmonic: int, device: torch.device) -> Tensor:
 @torch.jit.script
 def generate_impulse_train(
         f0_t: Tensor, n_harmonic: int,
-        sampling_rate: float, start_phase: Optional[Tensor] = None) -> Tensor:
+        sampling_rate: float, start_phase: Optional[Tensor] = None,
+        harm_block: int = 0) -> Tensor:
+    """harm_block > 0 で倍音をブロックに分けて逐次加算する（長尺推論用の opt-in）。
+
+    既定 harm_block=0 は**従来と完全に同一の計算**（下の分岐は 1 文字も変えていない）。
+    学習は常にこちらを通るので、数値は 1 ビットも動かない。
+
+    なぜ必要か: 既定の実装は cos/weight を [B, n_harmonic, n_sample] で一度に作るため、
+    メモリが入力長に比例する（n_harmonic=200・44.1kHz で実測 約150MB/秒。24 秒で 3GB 超）。
+    学習は crop_frames=64（372ms）なので踏まないが、**フル長尺を torch で推論すると落ちる**。
+    ブロック化するとピークが n_harmonic ではなく harm_block に比例する。
+    総和が逐次加算になるので既定版とはビット一致しない（float32 の丸め相当）。
+    """
+    if harm_block > 0:
+        # 位相 cumsum は [B, 1, n] のまま全長で持つ（安い）。重いのは ×n_harmonic の展開。
+        phase = f0_t.double().cumsum(dim=-1)
+        src = torch.zeros_like(f0_t)
+        k = 0
+        while k < n_harmonic:
+            e = k + harm_block
+            if e > n_harmonic:
+                e = n_harmonic
+            fmb = torch.arange(float(k + 1), float(e + 1), device=f0_t.device,
+                               dtype=f0_t.dtype).reshape(1, e - k, 1)
+            wmb = torch.sigmoid(-(fmb * f0_t - sampling_rate / 2.0))
+            cyb = phase * (fmb.double() / sampling_rate)
+            if start_phase is not None:
+                cyb = cyb + fmb.double() * start_phase.double()
+            w0b = ((cyb - torch.floor(cyb)) * (2.0 * math.pi)).to(f0_t.dtype)
+            src = src + torch.sum(torch.cos(w0b) * wmb, dim=1, keepdim=True)
+            k = e
+        return src * 0.01
 
     fm = freq_multiplier(n_harmonic, f0_t.device)
     weight_map = torch.sigmoid(-(fm * f0_t - sampling_rate / 2.0))

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.nn.utils import parametrize, parametrizations
@@ -308,6 +309,14 @@ class NHVSingV3(nn.Module):
         self.ltv_ola_mode = ltv_filter_cfg.get('ola_mode', 'square')
         # train-only: randomise the impulse start phase per batch (default False; eval/ONNX = phase 0).
         self.excit_phase_jitter = bool(vocoder_cfg.get('excit_phase_jitter', False))
+        # 励起の倍音和を何本ずつ足すか。0（既定）= 一括＝**従来と完全に同一の数値**。
+        # 一括版は cos/weight を [B, n_harmonic, n_sample] で作るのでメモリが入力長に比例し、
+        # 実測 約150MB/秒（24 秒で 3GB 超）。学習は crop_frames=64（372ms）なので踏まないが、
+        # **フル長尺を torch で推論すると落ちる**。その用途では 20 程度を指定するとピークが
+        # harm_block に比例するようになる（総和が逐次加算になるので -139dB ずれる）。
+        # 環境変数 NHV_HARM_BLOCK でも指定できる（config を触らずに推論側だけ切り替える用）。
+        self.harm_block = int(vocoder_cfg.get('harm_block',
+                                              os.environ.get('NHV_HARM_BLOCK', 0)))
 
         if vocoder_cfg.get('use_weight_norm', True):
             self._apply_weight_norm()
@@ -336,7 +345,8 @@ class NHVSingV3(nn.Module):
         start_phase = None
         if self.training and self.excit_phase_jitter:
             start_phase = torch.rand(x.size(0), 1, 1, device=x.device, dtype=cf0_resampled.dtype)
-        harmonic_source = self.impulse_generator(cf0_resampled, self.n_harmonic, float(self.fs), start_phase)
+        harmonic_source = self.impulse_generator(cf0_resampled, self.n_harmonic, float(self.fs),
+                                                 start_phase, self.harm_block)
         voiced_resampled = repeat_interpolate((1.0 - uv), self.hop_size)   # hard v/uv gate(ZOH)
         harmonic_source  = harmonic_source * voiced_resampled
 

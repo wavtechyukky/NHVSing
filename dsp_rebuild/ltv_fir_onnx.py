@@ -9,8 +9,14 @@ The core idea is to replace problematic PyTorch operators with ONNX-friendly equ
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import os
 import yaml
+
+try:                                    # torch>=2.6 相当。無ければ非分割へフォールバック
+    from torch._higher_order_ops.scan import scan as _scan
+except Exception:                       # noqa: BLE001
+    _scan = None
 
 class LTVFirONNX(nn.Module):
     """
@@ -18,9 +24,16 @@ class LTVFirONNX(nn.Module):
     Combines frame_signal, fftshift, FFT-based convolution, and OLA (scatter_add)
     into a single module to avoid nested module tracing issues.
     """
-    def __init__(self, frame_size: int, filter_size: int = 0, use_hann: bool = False):
+    def __init__(self, frame_size: int, filter_size: int = 0, use_hann: bool = False,
+                 frame_block: int = 0):
         super().__init__()
         self.frame_size = frame_size
+        # フレーム方向のブロック長。0 以下で非分割（従来どおり）。
+        # FFT 段の中間テンソルは [B, n_frame, L, 2] で、分割しないと長さに比例して巨大化する
+        # （L=2048・hop256 で 1 テンソルあたり 16KB/フレーム、これが 10 本前後同時に生きる）。
+        # FFT は dim=-1（フレーム内）のみなので、フレーム方向の分割は演算として厳密等価。
+        # OLA の加算順序だけが変わるため、出力は float32 の丸め分（実測 -142dB）だけずれる。
+        self.frame_block = int(frame_block) if frame_block else int(os.environ.get('NHV_LTV_BLOCK', 128))
         # use_hann=True: same Hann WOLA (window length 2*frame_size, 50% overlap) as the eager
         # reference dsp.hann_ltv_fir (plain-PyTorch implementation used as the ground truth).
         # use_hann=False: legacy square OLA (bit-exact with the old graph). Set this to match
@@ -78,6 +91,92 @@ class LTVFirONNX(nn.Module):
         Returns:
             striped_y: [n_batch, 1, n_sample]
         """
+        if self.frame_block > 0 and _scan is not None:
+            return self._forward_blocked(x, filters)
+        return self._forward_whole(x, filters)
+
+    def _forward_blocked(self, x: torch.Tensor, filters: torch.Tensor) -> torch.Tensor:
+        """フレームを frame_block 本ずつ scan で処理する。ピークがブロック長で決まる定数になる。
+
+        重いのは FFT 段の [B, n_frame, L, 2]（L=2048 で 16KB/フレーム × 10 本前後）であって、
+        フレーム化した信号 [B, n_frame, ws]（ws=512 で 2KB/フレーム）は軽い。そこで
+        **フレーム化までは全長で行い、FFT 段だけをブロック化**する。こうすると
+        ブロック長を入力長から計算する必要が無くなり（reshape だけで切れる）、
+        ONNX で長さが定数に焼き付く問題も起きない。
+
+        ONNX では Python の for がトレース時に展開されフレーム数が固定されるため、
+        `torch._higher_order_ops.scan`（ONNX の Scan 演算子）で動的回数のループにする。
+        """
+        n_sample = x.size(-1)
+        filter_size = filters.size(-1)
+        fs = self.frame_size
+        ws = fs * 2 if self.use_hann else fs
+        blk = self.frame_block
+        L_min = ws + filter_size - 1
+        L = self._fast_fft_len if self._fast_fft_len >= L_min else L_min
+
+        # === Step 1-2: フレーム化 + fftshift（非分割版と同一・全長のまま）===
+        if self.use_hann:
+            xp = F.pad(x, [fs, fs - 1])
+        else:
+            xp = x
+        framed_x = F.unfold(xp.unsqueeze(-1), kernel_size=(ws, 1),
+                            stride=(fs, 1)).transpose(1, 2)          # [B, n_frame_x, ws]
+        if self.use_hann:
+            framed_x = framed_x * self.hann_win.to(framed_x.dtype)
+        sp = (filter_size + 1) // 2
+        filters = torch.cat((filters[..., sp:], filters[..., :sp]), dim=-1)
+
+        # フレーム数を filters 側に合わせる（非分割版は filters の n_frame で OLA する）
+        n_frame = filters.size(1)
+        framed_x = framed_x.narrow(1, 0, n_frame)
+
+        # === ブロックへ reshape（長さ依存の算術は不要）===
+        # **バッチ次元は scan の中へ持ち込む**（[nb, B, blk, *]）。[B*nb, blk, *] に畳むと
+        # 別バッチのブロックが 1 本のストリームへ OLA され、B>1 で壊れる。
+        B = x.size(0)
+        npad = (-n_frame) % blk
+        fx = (F.pad(framed_x, (0, 0, 0, npad)).reshape(B, -1, blk, ws)
+              .transpose(0, 1).contiguous())                                # [nb, B, blk, ws]
+        fl = (F.pad(filters, (0, 0, 0, npad)).reshape(B, -1, blk, filter_size)
+              .transpose(0, 1).contiguous())                                # [nb, B, blk, fsz]
+        nb = fl.size(0)
+
+        blk_n = L + (blk - 1) * fs
+        idx = (torch.arange(blk, device=x.device).unsqueeze(1) * fs
+               + torch.arange(L, device=x.device).unsqueeze(0)).reshape(1, 1, -1)
+
+        def body(carry, xs):
+            fr, fi = xs[0], xs[1]                                    # 各 [B, blk, *]
+            # FFT は dim=-1（フレーム内）だけなので、フレーム方向に切っても**各フレームの
+            # FFT は 1 ビットも変わらない**。非分割版との差は OLA の加算順序だけから出る。
+            # 実測（use_hann 2 通り × B∈{1,2,3} × フレーム数 6 通り）:
+            #   frame_block=128（既定） … **ビット一致**（36/36）
+            #   frame_block=32 / 64 / 256 … -153 / -158 / -161dB
+            # なお fold(Col2Im) でも書ける。ONNX は 7.5MB→3.3MB と小さくなるが、
+            # blk=128 以外で加算順序が変わる（-157dB）ので、既定のビット一致を優先して採らない。
+            fz = torch.fft.ifft(torch.fft.fft(fr, n=L, dim=-1)
+                                * torch.fft.fft(fi, n=L, dim=-1),
+                                n=L, dim=-1).real                    # [B, blk, L]
+            nB = fz.size(0)
+            buf = torch.zeros(nB, 1, blk_n, dtype=fz.dtype, device=fz.device)
+            buf = buf.scatter_add(2, idx.expand(nB, 1, -1), fz.reshape(nB, 1, -1))
+            return carry.clone(), (buf.reshape(nB, blk_n),)          # [B, blk_n]
+
+        c0 = torch.zeros(1, dtype=x.dtype, device=x.device)
+        _, (ys,) = _scan(body, c0, (fx, fl))                         # [nb, B, blk_n]
+
+        # === ブロック間の OLA（ブロック i は i*blk*fs から blk_n サンプル）===
+        total = (nb - 1) * (blk * fs) + blk_n
+        idx2 = (torch.arange(nb, device=x.device).unsqueeze(1) * (blk * fs)
+                + torch.arange(blk_n, device=x.device).unsqueeze(0)).reshape(1, 1, -1)
+        y = torch.zeros(B, 1, total, dtype=x.dtype, device=x.device)
+        y = y.scatter_add(2, idx2.expand(B, 1, -1),
+                          ys.transpose(0, 1).reshape(B, 1, -1))      # [B, nb*blk_n]
+        start = filter_size // 2 + (fs if self.use_hann else 0)
+        return y.narrow(2, start, n_sample)
+
+    def _forward_whole(self, x: torch.Tensor, filters: torch.Tensor) -> torch.Tensor:
         n_sample = x.size(-1)
         filter_size = filters.size(-1)
 
