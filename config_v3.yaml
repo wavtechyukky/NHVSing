@@ -2,7 +2,7 @@
 #
 # 生成器 V3: mel のみ入力 / 白色 200 倍音励起 / quef_norm α=1.0 /
 #            uv hard gate(推論時の無声保護)/ f0_upsample linear / weight_norm。
-# hop512 入力(OpenUtau 等)で使う場合は ltv_filter.use_v3x: true(V3X: 内部で 256 補間)。
+# hop512 入力で使う場合は ltv_filter.use_v3x: true(V3X: 内部で 256 補間)。
 # 学習: MRD + MPD GAN(train.py)。データ/出力ディレクトリはコマンドライン/環境で指定する。
 
 seed: 42

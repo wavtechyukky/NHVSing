@@ -21,7 +21,7 @@
 # polish at 1/5 learning rate (lr_g 8e-5, lr_d 4e-5, D:G ratio kept), pitch_aug still 1.0.
 #
 # Generator V3: mel-only input / white 200-harmonic excitation / quef_norm alpha=1.0 / uv hard gate /
-# f0_upsample linear / weight_norm. For hop512 input (OpenUtau etc.) use ltv_filter.use_v3x: true.
+# f0_upsample linear / weight_norm. For hop512 input use ltv_filter.use_v3x: true.
 # Training: MRD + MPD GAN (train.py). Data/output dirs are given on the command line / environment.
 
 seed: 42

@@ -370,7 +370,7 @@ class NHVSingV3(nn.Module):
 class NHVSingV3X(NHVSingV3):
     """NHVSing V3X — V3 を hop512 入力で使えるようにした派生。
 
-    OpenUtau 等が出す hop512 の mel/f0/uv を受け、内部で整列中点補間して hop256 グリッドへ
+    hop512 の mel/f0/uv を受け、内部で整列中点補間して hop256 グリッドへ
     戻してから V3 を通す(重みは V3 と共有。state_dict も V3 と同一 = convs_onnx.*)。
     forward(mel512, cf0_512, uv_512): それぞれ hop512(11.6ms/フレーム @44.1k)。
     """

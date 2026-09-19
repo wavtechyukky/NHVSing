@@ -7,7 +7,7 @@ weights, following the exact V3/V3.1-demo methodology:
     (+ ``clean_jumps``), RMS-normalized to ``preprocess.target_rms``
   * V3.2  : hop-256 features as-is (Hann WOLA in the LTV filter)
   * V3.2X : the same features sub-sampled to the hop-512 grid (``[::2]``, the
-    grid OpenUtau/DiffSinger produce) and upsampled back internally — same as
+    grid DiffSinger produces) and upsampled back internally — same as
     the V3X column of the V3 demo
   * mel-L1 = mean |ln-mel(resynth) − ln-mel(GT)|, recomputed here for V3.2,
     V3.2X **and** the existing NSF-HiFiGAN wavs so all numbers on the page
@@ -209,7 +209,7 @@ def render_page(rows):
 
 <main>
 
-  <div class="intro">Copy-synthesis of the same held-out validation clips as the <a href="v3.html">V3 demo</a>, re-synthesized with the released <b>V3.2</b> weights (<code>exported_models/v3_2/</code>). <b>V3.2X receives the mel sub-sampled to the hop-512 grid</b> (the grid OpenUtau / DiffSinger produce) and upsamples it back internally, exactly like the V3X column of the V3 demo. mel-L1 (mean |Δln-mel| against the ground-truth mel; lower = closer) is recomputed here for all three synthesized columns with one measurement, so the numbers are directly comparable within this page — but not to the V3 page. Note that the dropout fix is a phase/periodicity change that mel-L1 (a magnitude metric) barely sees; judge it by listening to the high notes. Architecture, model size and RTF are unchanged from V3 (see the <a href="v3.html">V3 page</a> for the efficiency tables).</div>
+  <div class="intro">Copy-synthesis of the same held-out validation clips as the <a href="v3.html">V3 demo</a>, re-synthesized with the released <b>V3.2</b> weights (<code>exported_models/v3_2/</code>). <b>V3.2X receives the mel sub-sampled to the hop-512 grid</b> (the grid DiffSinger produces) and upsamples it back internally, exactly like the V3X column of the V3 demo. mel-L1 (mean |Δln-mel| against the ground-truth mel; lower = closer) is recomputed here for all three synthesized columns with one measurement, so the numbers are directly comparable within this page — but not to the V3 page. Note that the dropout fix is a phase/periodicity change that mel-L1 (a magnitude metric) barely sees; judge it by listening to the high notes. Architecture, model size and RTF are unchanged from V3 (see the <a href="v3.html">V3 page</a> for the efficiency tables).</div>
 
   <section>
     <h2>Copy-synthesis (NHVSing V3.2 / V3.2X vs pc-nsf-hifigan)</h2>

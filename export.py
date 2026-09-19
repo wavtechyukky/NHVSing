@@ -1,7 +1,7 @@
 """NHVSing V3 / V3X の ONNX エクスポート + 検証 + RTF 計測。
 
 V3  … hop256 native。入力 mel[B,T,mel_dim] / f0[B,1,T] / uv[B,1,T]。
-V3X … hop512 入力を内部で hop256 へ整列補間してから V3。OpenUtau 等の hop512 mel をそのまま食う。
+V3X … hop512 入力を内部で hop256 へ整列補間してから V3。hop512 の mel をそのまま食う。
 
 ONNX グラフは dsp_rebuild の ONNX 互換部品(GenerateImpulseTrainONNX / ComplexCepstrumToImpONNX /
 LTVFirONNX)で組む。LTVFirONNX は FFT 長を 2 の冪へ pad 済み(ORT DFT が非冪で ~4-8x 遅い対策・bit 等価)。

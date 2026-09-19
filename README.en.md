@@ -22,7 +22,7 @@ This repository contains the latest **NHVSing V3 / V3X** (the quality-improved *
 - **Training-data curation & augmentation**: gathered high-quality 44.1 kHz audio and, during training, fed it while randomly varying volume and pitch. Although this feeds the model waveforms that deviate from ordinary ones, it significantly improved the vocoder's generalization.
 - **Cleaner excitation/conditioning**: many measures were tried to raise quality, but the two above had the largest effect, so the configuration was reverted to follow the original paper for now (a major restructuring would likely be V4 or later). The excitation impulse sums sine waves up to the 200th harmonic / quef_norm α=1.0 / **mel-only input** (F0 embedding removed) / linear F0 interpolation (a return to the original NHV).
 
-**V3X** lets V3 run on **hop512 input**: it takes the hop512 mel/F0 emitted by e.g. OpenUtau, interpolates internally to the hop256 grid, then runs V3 (weights/state_dict shared with V3). This **resolves the "hop512 severely degrades quality" limitation** of V1/V2.
+**V3X** lets V3 run on **hop512 input**: it takes hop512 mel/F0, interpolates internally to the hop256 grid, then runs V3 (weights/state_dict shared with V3). This **resolves the "hop512 severely degrades quality" limitation** of V1/V2.
 
 | Class | Purpose | config |
 |---|---|---|
