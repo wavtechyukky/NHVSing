@@ -58,6 +58,17 @@ The released ONNX allocated memory proportional to the input length and **died p
 
 Both use `torch._higher_order_ops.scan` (ONNX `Scan`) for a dynamic trip count. Memory went from **~125 MB/s to ~8 MB/s** of audio: 0.33 GB at 24 s, 2.05 GB even at 240 s. Against the previously released V3.2 the deterministic `harmonic` output matches to **within −142 dB** (float32 rounding; 46 dB below 16-bit quantization noise).
 
+**What it cost in speed** — the released ONNX before and after the fix, measured back to back on one machine (3 s input, median of 9, one measurement per process):
+
+| CPU threads | Before | After | |
+|---|---|---|---|
+| 1 | 0.071 | 0.073 | +4% |
+| 2 | 0.063 | 0.065 | +4% |
+| 4 | 0.059 | 0.063 | +7% |
+| 8 | 0.061 | 0.081 | **+33%** |
+
+The looped part cannot be split across threads, so the penalty grows with core count. A few percent at 1–4 threads is a fair price for not dying on a long phrase; if you want the fastest many-core path, the torch route (RTF tables below) does not use `Scan` and is faster there.
+
 > The released `v3` ONNX had been exported before the "float64 excitation phase" fix above and was never re-exported. It is re-exported here too (the error grows with length: −27.8 dB at 24 s). `v3_1` / `v3_2` already had the fix and are unaffected.
 
 **The training path (`dsp.py` / `model.py`) is bit-identical by default.** The eager implementation has the same issue (measured ~150 MB/s, past 3 GB at 24 s), but training uses 372 ms crops and never hits it. For long-form torch inference, `vocoder.harm_block: 20` (or `NHV_HARM_BLOCK=20`) loops the harmonic sum; the default 0 is exactly the previous computation.
@@ -73,7 +84,7 @@ The exact training recipe is **`config_v3_2.yaml`**.
 
 **Model size**: `nhv_v3.onnx` is about **7.8 MB** (no quantization) — roughly **1/7** the size of NSF-HiFiGAN (pc-nsf-hifigan, 56.7 MB), the reference we compare against.
 
-> It was about 2.2 MB up to V3.2. Fixing the long-input memory blow-up (below) turned the excitation and the time-varying FIR into `Scan` loops, which bakes the `scatter_add` index tables into the graph as constants (+5.6 MB). **The weights are still 0.478 M parameters** — only indices were added.
+> It was about 2.2 MB up to V3.2. Fixing the long-input memory blow-up (above) turned the excitation and the time-varying FIR into `Scan` loops, which bakes the `scatter_add` index tables into the graph as constants (+5.6 MB). **The weights are still 0.478 M parameters** — only indices were added.
 
 **RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU (4 performance + 6 efficiency) / ~5 s input / batch 1 / median of 9 runs. **Every figure below comes from one interleaved session**, one measurement per process (putting several ORT sessions in one process shifts the numbers by up to 1.4×).
 
@@ -86,7 +97,9 @@ Under ONNX Runtime (CPU), side by side with NSF-HiFiGAN:
 | 4 | 0.058 (17×) | 0.196 (5×) | 3.4× |
 | 8 | 0.075 (13×) | 0.199 (5×) | 2.6× |
 
-**The two scale very differently with core count.** NHVSing V3's per-frame impulse-response generation is fully independent (*embarrassingly parallel*), but **ONNX Runtime barely exploits this**, so V3 is essentially single-core-bound (14×→17× and then flat). NSF-HiFiGAN's large transposed convolutions parallelize well, so it keeps speeding up with more cores (2×→5×). As a result, **NHVSing's speed lead is largest on low-core devices (~8×) and narrows to ~3× on many cores**, but it stays ahead throughout. Note that 8 threads reaches into the efficiency cores, where both models do worse than at 4.
+**The two scale very differently with core count.** NHVSing V3's per-frame impulse-response generation is fully independent (*embarrassingly parallel*), but **ONNX Runtime barely exploits this**, so V3 is essentially single-core-bound (14×→17× and then flat). NSF-HiFiGAN's large transposed convolutions parallelize well, so it keeps speeding up with more cores (2×→5×). As a result, **NHVSing's speed lead is largest on low-core devices (~8×) and narrows to ~3× on many cores**, but it stays ahead throughout.
+
+Both models do worse at 8 threads than at 4, but **not for the same reason**. NSF-HiFiGAN loses 1.5% because 8 threads reaches into the efficiency cores; NHVSing loses 29%, and most of that is the **sequential loop** introduced by the memory fix described above, which extra threads cannot split.
 
 **Native PyTorch does realize the parallelism.** Running the same V3 in torch scales with core count as the per-frame independence allows:
 
