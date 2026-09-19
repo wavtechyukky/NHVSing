@@ -46,6 +46,22 @@ This repository contains the latest **NHVSing V3 / V3X** (the quality-improved *
 
 > Note: "float64 excitation phase" and "continuous-ratio pitch augmentation" were originally introduced in **V3.1** and carried over into V3.2. What is new in V3.2 is the Hann windowing, the randomised excitation start phase, the extra short STFT window, and the low-LR finishing pass.
 
+**Memory fix in the released ONNX (2026-09-19; weights unchanged)**
+
+The released ONNX allocated memory proportional to the input length and **died past 3.4 GB on a single 24-second phrase** (on a 16 GB machine this fills swap and drags the whole OS down). Three places each expanded the full length at once:
+
+| Where | Intermediate | Fix |
+|---|---|---|
+| Excitation (`impulse_train_onnx`) | `cos` of `[B, 200, 256T]` | Sum the 200 harmonics in a **loop** into a `[B,1,n]` accumulator |
+| Time-varying FIR FFT (`ltv_fir_onnx`) | `[B, T, 2048, 2]` ×10 | **Block over frames** (the FFT is within a frame, so per-frame results are unchanged) |
+| Cepstrum→IR (`complex_cepstrum_to_imp_onnx`) | `[B, T, 1024, 2]` ×6 | Same |
+
+Both use `torch._higher_order_ops.scan` (ONNX `Scan`) for a dynamic trip count. Memory went from **~125 MB/s to ~8 MB/s** of audio: 0.33 GB at 24 s, 2.05 GB even at 240 s. Against the previously released V3.2 the deterministic `harmonic` output matches to **within −142 dB** (float32 rounding; 46 dB below 16-bit quantization noise).
+
+> The released `v3` ONNX had been exported before the "float64 excitation phase" fix above and was never re-exported. It is re-exported here too (the error grows with length: −27.8 dB at 24 s). `v3_1` / `v3_2` already had the fix and are unaffected.
+
+**The training path (`dsp.py` / `model.py`) is bit-identical by default.** The eager implementation has the same issue (measured ~150 MB/s, past 3 GB at 24 s), but training uses 372 ms crops and never hits it. For long-form torch inference, `vocoder.harm_block: 20` (or `NHV_HARM_BLOCK=20`) loops the harmonic sum; the default 0 is exactly the previous computation.
+
 Released files in `exported_models/v3_2/` (standard `export.py` outputs, renamed):
 
 - **`nhv_v3_2.pth`** — V3/V3X shared weights
@@ -55,31 +71,35 @@ The exact training recipe is **`config_v3_2.yaml`**.
 
 ### Performance (V3)
 
-**Model size**: `nhv_v3.onnx` is about **2.2 MB** (no quantization) — roughly **1/26** the size of NSF-HiFiGAN (pc-nsf-hifigan, 56.7 MB), the reference we compare against.
+**Model size**: `nhv_v3.onnx` is about **7.8 MB** (no quantization) — roughly **1/7** the size of NSF-HiFiGAN (pc-nsf-hifigan, 56.7 MB), the reference we compare against.
 
-**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU / ~5 s input / batch 1 / median of 9 runs.
+> It was about 2.2 MB up to V3.2. Fixing the long-input memory blow-up (below) turned the excitation and the time-varying FIR into `Scan` loops, which bakes the `scatter_add` index tables into the graph as constants (+5.6 MB). **The weights are still 0.478 M parameters** — only indices were added.
+
+**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU (4 performance + 6 efficiency) / ~5 s input / batch 1 / median of 9 runs. **Every figure below comes from one interleaved session**, one measurement per process (putting several ORT sessions in one process shifts the numbers by up to 1.4×).
 
 Under ONNX Runtime (CPU), side by side with NSF-HiFiGAN:
 
 | CPU threads | NHVSing V3 | NSF-HiFiGAN | NHVSing speed-up |
 |---|---|---|---|
-| 1 | 0.076 (13×) | 0.604 (2×) | **8.0×** |
-| 2 | 0.065 (15×) | 0.316 (3×) | 4.9× |
-| 4 | 0.062 (16×) | 0.201 (5×) | 3.3× |
-| 8 | 0.063 (16×) | 0.198 (5×) | 3.1× |
+| 1 | 0.073 (14×) | 0.589 (2×) | **8.0×** |
+| 2 | 0.061 (16×) | 0.314 (3×) | 5.2× |
+| 4 | 0.058 (17×) | 0.196 (5×) | 3.4× |
+| 8 | 0.075 (13×) | 0.199 (5×) | 2.6× |
 
-**The two scale very differently with core count.** NHVSing V3's per-frame impulse-response generation is fully independent (*embarrassingly parallel*), but **ONNX Runtime barely exploits this**, so V3 is essentially single-core-bound (13×→16× and then flat). NSF-HiFiGAN's large transposed convolutions parallelize well, so it keeps speeding up with more cores (2×→5×). As a result, **NHVSing's speed lead is largest on low-core devices (~8×) and narrows to ~3× on many cores**, but it stays ahead throughout.
+**The two scale very differently with core count.** NHVSing V3's per-frame impulse-response generation is fully independent (*embarrassingly parallel*), but **ONNX Runtime barely exploits this**, so V3 is essentially single-core-bound (14×→17× and then flat). NSF-HiFiGAN's large transposed convolutions parallelize well, so it keeps speeding up with more cores (2×→5×). As a result, **NHVSing's speed lead is largest on low-core devices (~8×) and narrows to ~3× on many cores**, but it stays ahead throughout. Note that 8 threads reaches into the efficiency cores, where both models do worse than at 4.
 
 **Native PyTorch does realize the parallelism.** Running the same V3 in torch scales with core count as the per-frame independence allows:
 
 | CPU threads | ONNX Runtime | PyTorch |
 |---|---|---|
-| 1 | 0.076 (13×) | 0.082 (12×) |
-| 2 | 0.065 (15×) | 0.050 (20×) |
-| 4 | 0.062 (16×) | 0.043 (23×) |
-| 8 | 0.063 (16×) | **0.031 (32×)** |
+| 1 | 0.073 (14×) | 0.069 (15×) |
+| 2 | 0.061 (16×) | 0.051 (20×) |
+| 4 | 0.058 (17×) | **0.039 (26×)** |
+| 8 | 0.075 (13×) | 0.049 (20×) |
 
-On multiple cores, **torch actually beats our own ONNX export** (~2× at 8 threads): for such a tiny, FFT-dominated model, torch's batched-FFT parallelism helps more than ORT's graph optimizations. So "NHVSing is fast/slow" cannot be captured by a single number — it depends on the **runtime × core-count** combination.
+On multiple cores, **torch actually beats our own ONNX export** (~1.5× at 4 threads): for such a tiny, FFT-dominated model, torch's batched-FFT parallelism helps more than ORT's graph optimizations. So "NHVSing is fast/slow" cannot be captured by a single number — it depends on the **runtime × core-count** combination.
+
+> That torch column is `export.py`'s `FullVocoderV3` (the ONNX-facing parts run eagerly), not the training-side `model.py::NHVSingV3`.
 
 > RTF depends only on the amount of compute, not on the weight values (it is the same for any checkpoint).
 
