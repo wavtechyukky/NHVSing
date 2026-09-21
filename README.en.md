@@ -73,6 +73,8 @@ The looped part cannot be split across threads, so the penalty grows with core c
 
 **The training path (`dsp.py` / `model.py`) is bit-identical by default.** The eager implementation has the same issue (measured ~150 MB/s, past 3 GB at 24 s), but training uses 372 ms crops and never hits it. For long-form torch inference, `vocoder.harm_block: 20` (or `NHV_HARM_BLOCK=20`) loops the harmonic sum; the default 0 is exactly the previous computation.
 
+**The torch route (`export.py`'s `FullVocoderV3`) hit the same problem in eager mode (fixed 2026-09-21; weights unchanged).** The eager execution of the excitation impulse train ran the `Scan` version as is and peaked at +4.2 GB on a 37-second input. In eager mode it now loops over time in 16384-sample blocks (`NHV_IMP_BLOCK`) with a plain Python `for`, which is **bit-identical** to the one-shot computation and peaks at +0.4 GB. The ONNX export path (`Scan`) is untouched: an ONNX exported after the change is identical to the released one in both graph and output. Losing the sequential loop also makes eager faster (before/after in one session: −11% / −18% / −26% / −41% at 1/2/4/8 threads).
+
 Released files in `exported_models/v3_2/` (standard `export.py` outputs, renamed):
 
 - **`nhv_v3_2.pth`** — V3/V3X shared weights
@@ -86,7 +88,7 @@ The exact training recipe is **`config_v3_2.yaml`**.
 
 > It was about 2.2 MB up to V3.2. Fixing the long-input memory blow-up (above) turned the excitation and the time-varying FIR into `Scan` loops, which bakes the `scatter_add` index tables into the graph as constants (+5.6 MB). **The weights are still 0.478 M parameters** — only indices were added.
 
-**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU (4 performance + 6 efficiency) / ~5 s input / batch 1 / median of 9 runs. **Every figure below comes from one interleaved session**, one measurement per process (putting several ORT sessions in one process shifts the numbers by up to 1.4×).
+**RTF** (Real-Time Factor = seconds of compute per second of audio; lower is faster, and < 1 means faster than real time). Measured on an M4 MacBook Air 10-core CPU (4 performance + 6 efficiency) / ~5 s input / batch 1 / median of 9 runs. **Each table comes from one interleaved session**, one measurement per process (putting several ORT sessions in one process shifts the numbers by up to 1.4×). The NSF-HiFiGAN comparison was measured on 2026-09-19, the torch comparison on 2026-09-21 after the eager fix above.
 
 Under ONNX Runtime (CPU), side by side with NSF-HiFiGAN:
 
@@ -105,14 +107,14 @@ Both models do worse at 8 threads than at 4, but **not for the same reason**. NS
 
 | CPU threads | ONNX Runtime | PyTorch |
 |---|---|---|
-| 1 | 0.073 (14×) | 0.069 (15×) |
-| 2 | 0.061 (16×) | 0.051 (20×) |
-| 4 | 0.058 (17×) | **0.039 (26×)** |
-| 8 | 0.075 (13×) | 0.049 (20×) |
+| 1 | 0.067 (15×) | 0.059 (17×) |
+| 2 | 0.058 (17×) | 0.039 (25×) |
+| 4 | 0.059 (17×) | **0.032 (32×)** |
+| 8 | 0.073 (14×) | **0.029 (34×)** |
 
-On multiple cores, **torch actually beats our own ONNX export** (~1.5× at 4 threads): for such a tiny, FFT-dominated model, torch's batched-FFT parallelism helps more than ORT's graph optimizations. So "NHVSing is fast/slow" cannot be captured by a single number — it depends on the **runtime × core-count** combination.
+On multiple cores, **torch actually beats our own ONNX export** (~1.9× at 4 threads, ~2.5× at 8): for such a tiny, FFT-dominated model, torch's batched-FFT parallelism helps more than ORT's graph optimizations. So "NHVSing is fast/slow" cannot be captured by a single number — it depends on the **runtime × core-count** combination.
 
-> That torch column is `export.py`'s `FullVocoderV3` (the ONNX-facing parts run eagerly), not the training-side `model.py::NHVSingV3`.
+> That torch column is `export.py`'s `FullVocoderV3` (the ONNX-facing parts run eagerly), not the training-side `model.py::NHVSingV3`. The ORT column was re-measured on the same day in the same session, so it differs by a few percent from the ORT column of the NSF-HiFiGAN table above, which comes from a different day.
 
 > RTF depends only on the amount of compute, not on the weight values (it is the same for any checkpoint).
 

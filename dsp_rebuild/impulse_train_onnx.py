@@ -25,6 +25,19 @@ except Exception:                       # noqa: BLE001
     _scan = None
 
 
+def _tracing() -> bool:
+    """ONNX エクスポート等のトレース中か（dynamo / torch.export / TorchScript trace）。
+
+    トレース中は Python の for が展開されて長さが固定されるので scan 版へ、eager では Python ループへ分岐する。
+    """
+    comp = getattr(torch, 'compiler', None)
+    for name in ('is_compiling', 'is_exporting'):
+        fn = getattr(comp, name, None)
+        if fn is not None and fn():
+            return True
+    return bool(torch.jit.is_tracing())
+
+
 def freq_multiplier_onnx(n_harmonic: int, dtype: torch.dtype, device: torch.device) -> Tensor:
     """Generate harmonic multiplier [1, 2, ..., n_harmonic] as [1, n_harmonic, 1]"""
     return torch.arange(1, n_harmonic + 1, dtype=dtype, device=device).view(1, n_harmonic, 1)
@@ -48,17 +61,22 @@ class GenerateImpulseTrainONNX(nn.Module):
         self.n_harmonic = n_harmonic
         self.sampling_rate = float(sampling_rate)
         # 素の実装は cos(w0) を [B, n_harmonic, n_sample] で一度に作るため、長さに比例して
-        # 巨大化する（n_harmonic=200・44.1kHz で 35MB/秒）。対策は 2 通りあり mode で選ぶ。
+        # 巨大化する（n_harmonic=200・44.1kHz で 35MB/秒）。
         #
-        # 'harmonic'（既定）… **倍音方向のループ**。[B,1,n] の累算器に n_harmonic 回足す。
+        # eager 実行（推論・bench）… 時間方向のブロック分割を **Python の for** で回す。
+        #                     ピークは n_harmonic×block の定数で、一括版と**ビット一致**
+        #                     （要素ごとの式も dim=1 の総和順序も同じ）。
+        # ONNX エクスポート（トレース中）… Python の for は展開されて長さが固定されるので、
+        #                     `torch._higher_order_ops.scan`（ONNX の Scan）で動的回数にする。
+        #                     どちらの向きに回すかを mode で選ぶ。
+        #   'harmonic'（既定）… **倍音方向のループ**。[B,1,n] の累算器に n_harmonic 回足す。
         #                     中間が [B,1,n] だけになるのでピークは O(n)＝入力長にしか依らない。
-        #                     非ループ版と**ビット一致**（実測 max|差|=0）。V3X のエクスポートも
-        #                     これでないと通らない（'time' は ConversionError）。
-        # 'time'        … **時間方向のブロック分割**。1 パスで済むがピークが
-        #                     n_harmonic×block に比例して残る。block で長さを指定する。
-        # 'off'         … 対策なし（従来の実装）。対照実験用。
+        #                     V3X のエクスポートもこれでないと通らない（'time' は ConversionError）。
+        #                     総和が逐次加算になるので一括版とは float32 の丸めぶん違う。
+        #   'time'        … **時間方向のブロック分割**を scan で。ピークが n_harmonic×block。
+        # 'off'         … 対策なし（従来の一括実装）。eager でもエクスポートでも一括。対照実験用。
         self.mode = os.environ.get('NHV_IMP_MODE', 'harmonic')
-        # 'time' のときだけ使うブロック長 [samples]。'harmonic' / 'off' では参照しない。
+        # 時間ブロック長 [samples]。eager と 'time' が使う。'harmonic' / 'off' では参照しない。
         self.block = int(block) if block else int(os.environ.get('NHV_IMP_BLOCK', 16384))
         
         # Harmonic multiplier [1, n_harmonic, 1]
@@ -83,21 +101,15 @@ class GenerateImpulseTrainONNX(nn.Module):
         """
         # Ensure input is float32
         f0_t = f0_t.float()
-        
+
         # Move multiplier to same device as input
         multiplier = self.multiplier.to(f0_t.device).float()
-        
-        # Reference implementation line-by-line replication:
-        # f0_map = freq_multiplier(n_harmonic, f0_t.device) * f0_t
-        f0_map = multiplier * f0_t
-        
-        # weight_map = torch.sigmoid(-(f0_map - sampling_rate / 2.0))
-        weight_map = torch.sigmoid(-(f0_map - self.sampling_rate / 2.0))
-        
-        # w0_map_cum = (
-        #     f0_t.cumsum(dim=-1) * 2.0 * math.pi / sampling_rate *
-        #     freq_multiplier(n_harmonic, f0_t.device)
-        # )
+
+        # Reference implementation (dsp.py::generate_impulse_train):
+        #   f0_map = freq_multiplier(n_harmonic, f0_t.device) * f0_t
+        #   weight_map = torch.sigmoid(-(f0_map - sampling_rate / 2.0))
+        #   w0_map_cum = f0_t.cumsum(dim=-1) * 2π / sampling_rate * freq_multiplier(...)
+        #   source = sum_h cos(w0_map_cum) * weight_map
         # 位相は float64 で cycles を累積 → mod 1.0 で [0,1) へ折り返し → float32 で ×2π → cos。
         # 旧実装は float64 cumsum の直後に float32 へ戻す no-op(pure float32 と 1bit 一致)で、累積値
         # (フル長尺で ~1e8, ULP≈10)の丸めにより位相が劣化し倍音間に滲みが出ていた。ONNX Runtime は
@@ -106,20 +118,44 @@ class GenerateImpulseTrainONNX(nn.Module):
         # ★fm/sr は前計算テンソル mult_over_sr を cumsum(f0) の後に掛ける(スカラ 1/sr を cumsum に
         #   掛けると ONNX が cumsum(f0/sr) に融合し runtime 間で ~0.047 ズレる。cumsum(f0) はビット一致)。
         # 位相 cumsum は [B, 1, n_sample] のまま全長で持つ（1 秒あたり 0.2MB と安い）。
-        # 重いのは「×n_harmonic 本」の展開なので、そこだけ時間ブロックに分ける。
+        # 重いのは「×n_harmonic 本」の展開（weight_map / cos）なので、そこだけ分割する。
         phase = f0_t.to(torch.float64).cumsum(dim=-1)                     # [B, 1, n_sample]
-        if self.mode == 'off' or _scan is None:
-            cycles = phase * self.mult_over_sr.to(f0_t.device)
-            w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(torch.float32)
-            source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
-            return source * 0.01
-        if self.mode == 'harmonic':
+        tracing = _tracing()
+        if self.mode == 'off' or (tracing and _scan is None):
+            return self._one_shot(f0_t, phase, multiplier) * 0.01
+        if tracing and self.mode == 'harmonic':
             return self._loop_harmonics(f0_t, phase) * 0.01
-        if self.block <= 0:                       # 'time' なのにブロック長が無い＝対策なし
-            cycles = phase * self.mult_over_sr.to(f0_t.device)
-            w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(torch.float32)
-            return torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True) * 0.01
-        return self._blocked(f0_t, phase, multiplier) * 0.01
+        if self.block <= 0:                       # ブロック長が無い＝対策なし
+            return self._one_shot(f0_t, phase, multiplier) * 0.01
+        if tracing:                               # 'time'
+            return self._blocked(f0_t, phase, multiplier) * 0.01
+        return self._blocked_eager(f0_t, phase, multiplier) * 0.01
+
+    def _one_shot(self, f0_t: Tensor, phase: Tensor, multiplier: Tensor) -> Tensor:
+        """従来の一括実装。[B, n_harmonic, n_sample] を展開する（長さに比例してメモリを食う）。"""
+        weight_map = torch.sigmoid(-(multiplier * f0_t - self.sampling_rate / 2.0))
+        cycles = phase * self.mult_over_sr.to(f0_t.device)
+        w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(torch.float32)
+        return torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
+
+    def _blocked_eager(self, f0_t: Tensor, phase: Tensor, multiplier: Tensor) -> Tensor:
+        """時間ブロック × Python の for（eager 専用）。一括版と**ビット一致**。
+
+        各ブロックで `_one_shot` と同じ式を同じ形 [B, n_harmonic, blk] で計算し dim=1 で総和するので、
+        要素ごとの演算も総和の順序も一括版と同じ。ピークは n_harmonic×block（既定 16384 で ~40MB）。
+        scan 版と違い展開の中間を一切持ち越さないので、eager では最速かつ最小メモリ。
+        """
+        n = f0_t.size(-1)
+        mos = self.mult_over_sr.to(f0_t.device)
+        sr_half = self.sampling_rate / 2.0
+        out = torch.empty_like(f0_t)
+        for s in range(0, n, self.block):
+            e = min(n, s + self.block)
+            weight_map = torch.sigmoid(-(multiplier * f0_t[..., s:e] - sr_half))
+            cycles = phase[..., s:e] * mos
+            w0 = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(torch.float32)
+            out[..., s:e] = torch.sum(torch.cos(w0) * weight_map, dim=1, keepdim=True)
+        return out
 
     def _loop_harmonics(self, f0_t: Tensor, phase: Tensor) -> Tensor:
         """倍音方向のループ。**累算器 [B,1,n] だけを持ち回り、スキャン出力は捨て値**。
