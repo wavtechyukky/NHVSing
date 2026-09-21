@@ -309,12 +309,16 @@ class NHVSingV3(nn.Module):
         self.ltv_ola_mode = ltv_filter_cfg.get('ola_mode', 'square')
         # train-only: randomise the impulse start phase per batch (default False; eval/ONNX = phase 0).
         self.excit_phase_jitter = bool(vocoder_cfg.get('excit_phase_jitter', False))
-        # 励起の倍音和を何本ずつ足すか。0（既定）= 一括＝**従来と完全に同一の数値**。
-        # 一括版は cos/weight を [B, n_harmonic, n_sample] で作るのでメモリが入力長に比例し、
-        # 実測 約150MB/秒（24 秒で 3GB 超）。学習は crop_frames=64（372ms）なので踏まないが、
-        # **フル長尺を torch で推論すると落ちる**。その用途では 20 程度を指定するとピークが
-        # harm_block に比例するようになる（総和が逐次加算になるので -139dB ずれる）。
-        # 環境変数 NHV_HARM_BLOCK でも指定できる（config を触らずに推論側だけ切り替える用）。
+        # 長尺推論のメモリ対策（既定で有効・学習には影響しない）:
+        #   励起 … dsp.generate_impulse_train が時間ブロック（32768 サンプル）で回す。一括版とビット一致。
+        #     学習クロップ（crop_frames=64=16384 サンプル。ピッチ拡張で伸びても最大 18176）は 1 ブロック。
+        #   時変 FIR / ケプストラム→IR … フレームを frame_block 本ずつ処理し、OLA は全長で 1 回。
+        #     n_frame が frame_block 以下（学習クロップは最大 71 フレーム）なら従来と同じ一括計算を通る。
+        # frame_block は ltv_filter.frame_block か環境変数 NHV_FRAME_BLOCK（既定 256 フレーム ≈ 1.5 秒）。
+        self.frame_block = int(ltv_filter_cfg.get('frame_block',
+                                                  os.environ.get('NHV_FRAME_BLOCK', 256)))
+        # harm_block > 0 は旧 opt-in（倍音方向のループ・一括版と -139dB ずれる）。時間ブロックが
+        # 既定になったので不要だが、config / NHV_HARM_BLOCK の互換のため残す。
         self.harm_block = int(vocoder_cfg.get('harm_block',
                                               os.environ.get('NHV_HARM_BLOCK', 0)))
 
@@ -323,9 +327,10 @@ class NHVSingV3(nn.Module):
 
     def _ltv(self, source, ccep, fft_size):
         """Dispatch the OLA mode via self.ltv_ola_mode: 'hann' -> Hann WOLA, else square (ltv_fir)."""
+        imp = complex_cepstrum_to_imp(ccep, fft_size, self.frame_block)
         if self.ltv_ola_mode == 'hann':
-            return hann_ltv_fir(source, complex_cepstrum_to_imp(ccep, fft_size), self.hop_size)
-        return ltv_fir(source, complex_cepstrum_to_imp(ccep, fft_size), self.hop_size)
+            return hann_ltv_fir(source, imp, self.hop_size, "fft", self.frame_block)
+        return ltv_fir(source, imp, self.hop_size, "fft", self.frame_block)
 
     def _forward_impl(self, x, cf0, uv, no_dsp_grad: bool = False, noise_std: float = -1.0,
                       harmonic_gain: float = 1.0, noise_gain: float = 1.0):

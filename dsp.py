@@ -24,7 +24,7 @@ from torch.nn.functional import pad
 from functools import lru_cache
 from math import pi
 import math
-from typing import Union, Optional, Iterable, Tuple
+from typing import Union, Optional, Iterable, Tuple, List
 from librosa.filters import mel as mel_fn
 
 
@@ -46,17 +46,22 @@ def freq_multiplier(n_harmonic: int, device: torch.device) -> Tensor:
 def generate_impulse_train(
         f0_t: Tensor, n_harmonic: int,
         sampling_rate: float, start_phase: Optional[Tensor] = None,
-        harm_block: int = 0) -> Tensor:
-    """harm_block > 0 で倍音をブロックに分けて逐次加算する（長尺推論用の opt-in）。
+        harm_block: int = 0, time_block: int = 32768) -> Tensor:
+    """白色 n_harmonic 倍音のインパルス列。既定は**時間ブロック**で回す。
 
-    既定 harm_block=0 は**従来と完全に同一の計算**（下の分岐は 1 文字も変えていない）。
-    学習は常にこちらを通るので、数値は 1 ビットも動かない。
+    一括版は cos/weight/位相の [B, n_harmonic, n_sample] 中間が同時に複数生きるので、メモリが
+    入力長に比例して膨らむ（n_harmonic=200・44.1kHz で実測 約 280MB/秒）。ここでは位相の cumsum
+    だけを全長 float64 で 1 回取り、cos と倍音和は time_block サンプルずつ [B, n_harmonic, blk] で
+    作る。ピークは n_harmonic×time_block の定数（既定 32768 で約 200MB）。
+    n_sample が time_block 以下なら 1 ブロック＝一括版と同じ計算（学習クロップ 16384 サンプルは
+    ピッチ拡張で伸びても最大 18176 なのでここに入る）。複数ブロックでも要素ごとの式は同じで、
+    dim=1 の総和も time_block が SIMD 幅の倍数（既定 32768。64 の倍数を推奨）なら一括版と
+    ビット一致する（CPU 実測: 7 s / 36.8 s / 端数 1 サンプルで max 差 0）。幅 16 未満の端数
+    ブロックは前のブロックに畳み込む（幅 1 だと総和の経路が変わり 1e-8 程度ずれるため）。
+    time_block を SIMD 幅の倍数以外にすると各ブロック末尾で float32 の丸め程度（~1e-7）ずれる。
 
-    なぜ必要か: 既定の実装は cos/weight を [B, n_harmonic, n_sample] で一度に作るため、
-    メモリが入力長に比例する（n_harmonic=200・44.1kHz で実測 約150MB/秒。24 秒で 3GB 超）。
-    学習は crop_frames=64（372ms）なので踏まないが、**フル長尺を torch で推論すると落ちる**。
-    ブロック化するとピークが n_harmonic ではなく harm_block に比例する。
-    総和が逐次加算になるので既定版とはビット一致しない（float32 の丸め相当）。
+    harm_block > 0 は倍音方向のループ（旧 opt-in）。逐次加算なので一括版と float32 の丸めぶん
+    違う（-139dB）。時間ブロックが既定になったので指定する必要はなくなったが、互換のため残す。
     """
     if harm_block > 0:
         # 位相 cumsum は [B, 1, n] のまま全長で持つ（安い）。重いのは ×n_harmonic の展開。
@@ -79,7 +84,6 @@ def generate_impulse_train(
         return src * 0.01
 
     fm = freq_multiplier(n_harmonic, f0_t.device)
-    weight_map = torch.sigmoid(-(fm * f0_t - sampling_rate / 2.0))
     # 位相は float64 で cycles 単位に累積し、mod 1.0 で [0,1) へ折り返してから float32 の cos に渡す。
     # float32 の cumsum はフル長尺(15s+)で累積値が ~1e8 に達し ULP≈10 まで粗くなって位相が劣化 →
     # 倍音間に滲み(サイドバンド)が出る。学習は短 crop(cumsum 小)で鋭いのに eval/配備はフル長尺で劣化する
@@ -89,16 +93,33 @@ def generate_impulse_train(
     #   cumsum(f0/sr)(=小値和)になって runtime 間で加算順序依存の非決定性が出る。cumsum(f0)(大値)は
     #   runtime 間でビット一致するので、fm/sr を float64 テンソルで先に作り cumsum の「後」にテンソル乗算する。
     # v3.1 の ckpt はこの励起で学習(旧 v3 以前の ckpt もそのまま動く: 変わるのは励起の位相精度のみ)。
-    cycles = f0_t.double().cumsum(dim=-1) * (fm.double() / sampling_rate)
+    # cumsum は全長で 1 回（[B,1,n] float64 = 0.35MB/秒）。ブロックごとに取ると累積順序が変わる。
+    phase = f0_t.double().cumsum(dim=-1)
+    fm_over_sr = fm.double() / sampling_rate
     # Train-only: randomise the impulse-train start phase (default None = phase 0, identical to the
     # old behaviour and to the ONNX graph). start_phase u in [0,1) is a fractional phase of the
     # fundamental period, so harmonic k is shifted by fm[k]*u cycles. Fixing the phase at 0 (GCI at
     # t=0) lets the CNN memorise a specific-phase ccep -> a cause of the high-pitch dropout; jittering
     # it per batch during training encourages a phase-independent filter.
-    if start_phase is not None:
-        cycles = cycles + fm.double() * start_phase.double()
-    w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(f0_t.dtype)
-    source = torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True)
+    n_sample = f0_t.size(-1)
+    if n_sample == 0:
+        return f0_t * 0.0
+    if time_block <= 0:
+        time_block = n_sample
+    outs: List[Tensor] = []
+    s = 0
+    while s < n_sample:
+        e = min(n_sample, s + time_block)
+        if n_sample - e < 16:                     # 幅 16 未満の端数は前のブロックに畳み込む
+            e = n_sample
+        weight_map = torch.sigmoid(-(fm * f0_t[:, :, s:e] - sampling_rate / 2.0))
+        cycles = phase[:, :, s:e] * fm_over_sr
+        if start_phase is not None:
+            cycles = cycles + fm.double() * start_phase.double()
+        w0_map_cum = ((cycles - torch.floor(cycles)) * (2.0 * math.pi)).to(f0_t.dtype)
+        outs.append(torch.sum(torch.cos(w0_map_cum) * weight_map, dim=1, keepdim=True))
+        s = e
+    source = outs[0] if len(outs) == 1 else torch.cat(outs, dim=-1)
     return source * 0.01
 
 
@@ -326,16 +347,29 @@ def complex_cepstrum_to_fft(
 
 @torch.jit.script
 def complex_cepstrum_to_imp(
-    ccep: Tensor, fft_size: int) -> Tensor:
+    ccep: Tensor, fft_size: int, frame_block: int = 0) -> Tensor:
     """Convert complex cepstrums to corresponding magnitude responses,
     phase responses, and impulse responses.
     Args:
         ccep: [ccep_size@dim]
         fft_size: Target fft_size, should be greater than ccep_size.
+        frame_block: > 0 かつ ccep が [B, n_frame, ccep_size] で n_frame がこれを超えるとき、
+            フレームを frame_block 本ずつ処理して結合する（長尺推論のメモリ対策）。各フレームの
+            FFT は独立なので結果は同じ。n_frame がブロック以下（学習クロップ）なら従来どおり一括。
     Returns:
         impulse_responses: [fft_size@dim]. Approximated time wrapped
             impulse responses.
     """
+    if frame_block > 0 and ccep.dim() == 3 and ccep.size(1) > frame_block:
+        outs: List[Tensor] = []
+        s = 0
+        n_frame = ccep.size(1)
+        while s < n_frame:
+            e = min(n_frame, s + frame_block)
+            Xb, _, _ = complex_cepstrum_to_fft(ccep[:, s:e], fft_size)
+            outs.append(torch.fft.ifft(Xb, dim=-1).real)
+            s = e
+        return torch.cat(outs, dim=1)
     X, _, _ = complex_cepstrum_to_fft(ccep, fft_size)
     x = torch.fft.ifft(X, dim=-1).real  # [fft_size@dim]
     return x
@@ -459,7 +493,7 @@ def fft_corr(x: Tensor, y: Tensor, flip: bool) -> Tensor:
 @torch.jit.script
 def _framewise_corr_ola(
     framed_x: Tensor, framed_y: Tensor, frame_shift: int,
-    method: str = "fft") -> Tensor:
+    method: str = "fft", frame_block: int = 0) -> Tensor:
     """Computes time-varying 1D correlation in time or frequency domain.
     This function receives framed signal x. It filters framed signal x,
     and unframe the signal with OLA. This function preserves all
@@ -470,8 +504,11 @@ def _framewise_corr_ola(
         framed_x: [n_batch, n_frame, nx]
         framed_y: [n_batch, n_frame, ny]
         method (str, optional): Either 'time' or 'fft'.
-        flip (bool, optional): Defaults to False. When set to True, the
-        signal y is flipped in time in each frame.
+        frame_block: > 0 で n_frame がこれを超えるとき、フレームごとの相関を frame_block 本ずつ
+            計算して結合する（長尺推論のメモリ対策。method='fft' のときのみ有効で、'time' では
+            無視して一括）。FFT の中間 [n_batch, n_frame, fft_size] complex がブロック長で
+            頭打ちになる。OLA（unframe_signal）は結合後に全長で 1 回なので加算順序は変わらない。
+            n_frame がブロック以下（学習クロップ）なら従来どおり一括。
 
     Returns:
         z: [n_batch, 1, (nx + ny - 1) + (n_frame - 1) * frame_shift]
@@ -479,7 +516,17 @@ def _framewise_corr_ola(
     if method == "fft":
         # FFT 等価実装(著者 dsp/conv.py の fft_corr, flip=True=畳み込み)。
         # time_corr(grouped conv1d)とビット等価で CPU 約8倍速。
-        framed_z = fft_corr(framed_x, framed_y, True)
+        n_frame = framed_x.size(1)
+        if frame_block > 0 and n_frame > frame_block:
+            outs: List[Tensor] = []
+            s = 0
+            while s < n_frame:
+                e = min(n_frame, s + frame_block)
+                outs.append(fft_corr(framed_x[:, s:e], framed_y[:, s:e], True))
+                s = e
+            framed_z = torch.cat(outs, dim=1)
+        else:
+            framed_z = fft_corr(framed_x, framed_y, True)
     else:
         framed_z = time_corr(framed_x, framed_y)
     output = unframe_signal(framed_z.transpose(-1, -2), frame_shift)
@@ -488,7 +535,8 @@ def _framewise_corr_ola(
 
 @torch.jit.script
 def ltv_fir(
-    x: Tensor, filters: Tensor, frame_size: int, method: str = "fft"
+    x: Tensor, filters: Tensor, frame_size: int, method: str = "fft",
+    frame_block: int = 0
 ) -> Tensor:
     """Linear time-varying FIR filter with a square OLA window.
     Notice that this implements a convolution rather than a correlation.
@@ -501,6 +549,7 @@ def ltv_fir(
                  back to continuous time order.
         frame_size: The frame size in sampling points.
         method: Either 'time' or 'fft'. Defaults to 'fft'.
+        frame_block: フレーム相関のブロック長（_framewise_corr_ola 参照。method='fft' のときのみ有効）。0 = 一括。
 
     Returns: [n_batch, 1, n_sample]
              n_sample: n_frame * frame_size
@@ -510,13 +559,14 @@ def ltv_fir(
     framed_x = frame_signal(x, frame_size, frame_size).transpose(-1, -2)
     # [n_batch, n_frame, frame_size]
     filters = fftshift(filters, dim=-1)
-    y = _framewise_corr_ola(framed_x, filters, frame_size, method)
+    y = _framewise_corr_ola(framed_x, filters, frame_size, method, frame_block)
     striped_y = y[..., filter_size // 2: n_sample + filter_size // 2]
     return striped_y
 
 
 def hann_ltv_fir(
-    x: Tensor, filters: Tensor, frame_size: int, method: str = "fft"
+    x: Tensor, filters: Tensor, frame_size: int, method: str = "fft",
+    frame_block: int = 0
 ) -> Tensor:
     """Linear time-varying FIR filter applied with a Hann WOLA (50% overlap).
 
@@ -527,6 +577,7 @@ def hann_ltv_fir(
     is what removes the high-pitch 1-period dropout. For an identity filter the
     middle of each frame stays transparent (COLA). This is the eager reference that the
     ONNX ``LTVFirONNX(use_hann=True)`` graph is built to match bit-for-bit.
+    frame_block: フレーム相関のブロック長（_framewise_corr_ola 参照。method='fft' のときのみ有効）。0 = 一括。
     """
     ws = frame_size * 2
     window = torch.hann_window(ws, periodic=True, dtype=x.dtype, device=x.device)
@@ -537,7 +588,7 @@ def hann_ltv_fir(
     padded = pad(x, [wl, wr])
     framed = frame_signal(padded, ws, frame_size).transpose(-1, -2) * window
     filters = fftshift(filters, dim=-1)
-    y = _framewise_corr_ola(framed, filters, frame_size, method)
+    y = _framewise_corr_ola(framed, filters, frame_size, method, frame_block)
     return y[..., filter_size // 2 + wl: n_sample + filter_size // 2 + wl]
 
 
