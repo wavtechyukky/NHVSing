@@ -211,6 +211,16 @@ def evaluate(model, test_loader, loss_fn, cfg, device):
     return stft_loss_eval / len(test_loader), env_loss_eval / len(test_loader)
 
 
+def _mel_vrange(cfg):
+    """mel プロットの (vmin, vmax) 既定。diffsinger(ln-mel, 値域 ~-12..4) は -12..4、
+    旧 V2(power_to_db, dB) は -80..0。config.preprocess の mel_vmin/mel_vmax があればそれを優先。
+    (既定を -80..0 のままにすると ln-mel が colormap 上端に張り付いて真っ黄色になる。)"""
+    p = cfg['preprocess']
+    is_ln = p.get('mel_format') == 'diffsinger'
+    return (p.get('mel_vmin', -12.0 if is_ln else -80.0),
+            p.get('mel_vmax', 4.0 if is_ln else 0.0))
+
+
 def plot_spectrogram(spectrogram, title="", vmin=None, vmax=None):
     fig, ax = plt.subplots(figsize=(12, 4))
     im = ax.imshow(spectrogram, aspect="auto", origin="lower",
@@ -486,7 +496,7 @@ def inference_pinpoint_files(model, device, writer, epoch, cfg, logged_real_mels
         if basename not in logged_real_mels:
             writer.add_figure('plot/' + basename + '/real',
                               plot_spectrogram(real_mel.T, title=f"real: {basename}",
-                                               vmin=cfg['preprocess'].get('mel_vmin', -80), vmax=cfg['preprocess'].get('mel_vmax', 0)), 0)
+                                               vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), 0)
             real_wav = np.load(npz_path)['wav']
             writer.add_audio('audio/' + basename + '/real',
                              torch.from_numpy(real_wav).unsqueeze(0), 0, sample_rate)
@@ -499,7 +509,7 @@ def inference_pinpoint_files(model, device, writer, epoch, cfg, logged_real_mels
         _fake_tag = 'fake uv-off' if fake_mel_u is not None else 'fake'
         writer.add_figure('plot/' + basename + '/fake',
                           plot_spectrogram(fake_mel_plot.T, title=f"{_fake_tag}: {basename}  ep{epoch}",
-                                           vmin=cfg['preprocess'].get('mel_vmin', -80), vmax=cfg['preprocess'].get('mel_vmax', 0)), epoch)
+                                           vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), epoch)
         writer.add_audio('audio/' + basename + '/fake',
                          torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
 
@@ -536,7 +546,7 @@ def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set
         if basename not in logged_real_mels:
             writer.add_figure('plot/' + basename + '/real',
                               plot_spectrogram(real_mel.T, title=f"real: {basename}",
-                                               vmin=cfg['preprocess'].get('mel_vmin', -80), vmax=cfg['preprocess'].get('mel_vmax', 0)), 0)
+                                               vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), 0)
             real_wav = np.load(npz_path)['wav']
             writer.add_audio('audio/' + basename + '/real',
                              torch.from_numpy(real_wav).unsqueeze(0), 0, sample_rate)
@@ -549,7 +559,7 @@ def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set
         _fake_tag = 'fake uv-off' if fake_mel_u is not None else 'fake'
         writer.add_figure('plot/' + basename + '/fake',
                           plot_spectrogram(fake_mel_plot.T, title=f"{_fake_tag}: {basename}  ep{epoch}",
-                                           vmin=cfg['preprocess'].get('mel_vmin', -80), vmax=cfg['preprocess'].get('mel_vmax', 0)), epoch)
+                                           vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), epoch)
         writer.add_audio('audio/' + basename + '/fake',
                          torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
 
@@ -897,8 +907,7 @@ def run(args, force_restart: bool = False):
 
     # スクリプト開始時に real(GT) のみ再プロット（vmin/vmax のスケール修正を反映）。
     # fake は未学習(zero-init で flat)なので出さない。fake は学習中の save_interval で記録される。
-    _vmin = cfg['preprocess'].get('mel_vmin', -80)
-    _vmax = cfg['preprocess'].get('mel_vmax', 0)
+    _vmin, _vmax = _mel_vrange(cfg)
     _sr = cfg['preprocess']['sample_rate']
     for _p in sorted(glob.glob(os.path.join(cfg['training']['test_dir'], '**/*.npz'), recursive=True)):
         _z = np.load(_p)
