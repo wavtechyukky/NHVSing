@@ -21,6 +21,9 @@ output*.wav
 !exported_models/**
 # ...but NOT the third-party NSF-HiFiGAN (OpenVPI) used only for the demo's optional comparison
 exported_models/nsf_hifigan.onnx
+# ...nor the experimental hnsep ep1100 export (superseded by v3_3)
+exported_models/v3_hnsep_ep1100/
+exported_models/v3_hnsep_ep1100.zip
 
 # Demo WAV outputs — track explicitly (reference audio for demo page)
 !wav/
@@ -46,6 +49,7 @@ output_test*/
 cepstrum_comparison.png
 inference_test/
 m4singer_onnx_test*/
+compare_hnsep/
 paper/
 encodec-main/
 
