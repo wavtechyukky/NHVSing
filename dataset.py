@@ -13,13 +13,17 @@ class VocoderDataset(Dataset):
         dataset_dir (str or Path): Root directory containing the .npz files.
         augment (bool): If True, apply random amplitude augmentation (training only).
         amp_aug_range (tuple): (min, max) linear amplitude scale. Default (0.5, 2.0).
+        load_harmonic (bool): If True, also return the hnsep harmonic ('harmonic' / '<sid>|harmonic',
+            added by tools/add_hnsep_harmonic.py) as a 5th item, trimmed/padded and amplitude-scaled
+            exactly like wav. The noise target is wav - harmonic.
     """
     def __init__(self, dataset_dir: str, hop_size: int, validate: bool = False,
                  augment: bool = False, amp_aug_range: tuple = (0.5, 2.0),
-                 diffsinger_mel: bool = False):
+                 diffsinger_mel: bool = False, load_harmonic: bool = False):
         self.dataset_path = Path(dataset_dir)
         self.hop_size = hop_size
         self.augment = augment
+        self.load_harmonic = load_harmonic
         # V3: ln-magnitude mel(OpenUtau/pc_nsf)のとき amp 補正は +ln(alpha)。
         # 既定 False は V2 互換 (power_to_db, +20*log10(alpha))。
         self.diffsinger_mel = diffsinger_mel
@@ -79,22 +83,30 @@ class VocoderDataset(Dataset):
         npz_path, seg_id = self.index[idx]
         npz = np.load(npz_path)
 
-        if seg_id is None:                       # segment npz（後方互換）
-            f0 = npz['f0']; log_melspc = npz['log_melspc']; wav = npz['wav']
-        else:                                    # shard npz
-            f0 = npz[seg_id + '|f0']
-            log_melspc = npz[seg_id + '|log_melspc']
-            wav = npz[seg_id + '|wav']
+        prefix = '' if seg_id is None else seg_id + '|'   # segment npz（後方互換） / shard npz
+        f0 = npz[prefix + 'f0']
+        log_melspc = npz[prefix + 'log_melspc']
+        wav = npz[prefix + 'wav']
+        harmonic = None
+        if self.load_harmonic:
+            if prefix + 'harmonic' not in npz.files:
+                raise KeyError(f"{npz_path}: '{prefix}harmonic' がありません(tools/add_hnsep_harmonic.py で追加)")
+            harmonic = npz[prefix + 'harmonic']
 
         # フレーム数 × hop_size に長さを厳密に合わせる
         n_frames = log_melspc.shape[0]
         expected_wav_len = n_frames * self.hop_size
-        
+
         # wavが長い場合は切り捨て、短い場合はゼロパディング
-        if len(wav) > expected_wav_len:
-            wav = wav[:expected_wav_len]
-        elif len(wav) < expected_wav_len:
-            wav = np.pad(wav, (0, expected_wav_len - len(wav)))
+        def _fit(x):
+            if len(x) > expected_wav_len:
+                return x[:expected_wav_len]
+            if len(x) < expected_wav_len:
+                return np.pad(x, (0, expected_wav_len - len(x)))
+            return x
+        wav = _fit(wav)
+        if harmonic is not None:
+            harmonic = _fit(harmonic)
 
         if self.augment and wav.size > 0:
             max_abs = np.abs(wav).max()
@@ -104,6 +116,8 @@ class VocoderDataset(Dataset):
                 log_alpha_max = max(log_alpha_max, self.amp_aug_log_min)
                 alpha = np.exp(np.random.uniform(self.amp_aug_log_min, log_alpha_max))
                 wav = wav * alpha
+                if harmonic is not None:
+                    harmonic = harmonic * alpha
                 # 振幅 alpha 倍 → mel の log 補正:
                 #   V2 power_to_db (10*log10(power), power∝alpha²) → +20*log10(alpha)
                 #   V3 ln-magnitude (magnitude∝alpha, OpenUtau/pc_nsf) → +1*ln(alpha)
@@ -114,7 +128,10 @@ class VocoderDataset(Dataset):
 
         f0, uv = norm_interp_f0(f0)
 
-        return f0[np.newaxis].astype('float32'), log_melspc.astype('float32'), wav.astype('float32'), uv[np.newaxis]
+        item = (f0[np.newaxis].astype('float32'), log_melspc.astype('float32'), wav.astype('float32'), uv[np.newaxis])
+        if harmonic is not None:
+            item = item + (harmonic.astype('float32'),)
+        return item
     
 
 # https://github.com/MoonInTheRiver/DiffSinger/blob/master/utils/pitch_utils.py
@@ -172,11 +189,13 @@ def collate_fn_padd(batch):
             - Padded waveforms.
             - Padded UV flags.
             - A mask tensor indicating the padded regions.
+            - (only when items carry a 5th element) Padded harmonic waveforms, appended last.
     """
     fine_f0s = []
     log_melspcs = []
     wavs = []
     uvs = []
+    harmonics = []
 
     wav_lengths = []
 
@@ -185,6 +204,8 @@ def collate_fn_padd(batch):
         log_melspcs.append(t[1])
         wavs.append(t[2])
         uvs.append(t[3][0])
+        if len(t) > 4:
+            harmonics.append(t[4])
 
         wav_lengths.append(len(t[2]))
 
@@ -200,6 +221,8 @@ def collate_fn_padd(batch):
 
     mask = get_mask_from_lengths(wav_lengths)
 
+    if harmonics:
+        return fine_f0s, log_melspcs, wavs, uvs, mask, np.array(pad_1D(harmonics))
     return fine_f0s, log_melspcs, wavs, uvs, mask
 
 

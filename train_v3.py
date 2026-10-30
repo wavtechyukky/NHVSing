@@ -25,20 +25,22 @@ import glob
 
 
 def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
-                        mel_sr, mel_nfft, mel_hop, mel_win, mel_dim, mel_fmin, mel_fmax):
+                        mel_sr, mel_nfft, mel_hop, mel_win, mel_dim, mel_fmin, mel_fmax, harmonic=None):
     """RefineGAN流 pitch augmentation(per-batch, GPU on-the-fly)。確率 pitch_aug_prob で
     バッチ全体を単一 r=2^(ζ/12) でピッチシフト。リサンプルで 新F0=旧F0×r(RMVPE不要)、mel は
     リサンプル波形から wav_to_mel_torch で再計算(preprocess 一致)。既定OFF or 非発動で現行と完全一致。
-    入力/返り: f0[B,1,Tf], log_melspc[B,Tf,M], wav[B,Ts], uv[B,1,Tf], mask[B,Tf](True=pad)。
+    入力/返り: f0[B,1,Tf], log_melspc[B,Tf,M], wav[B,Ts], uv[B,1,Tf], mask[B,Tf](True=pad),
+    harmonic[B,Ts] or None(hnsep の harmonic。wav と同じ線形補間をかけるので
+    interp(wav) = interp(harmonic) + interp(wav - harmonic) が厳密に成り立つ)。
     ※ ピッチダウン(ζ<0)=クロップが伸びるので多res STFT窓に安全。アップは短縮→レンジ上限を控えめに。"""
     tcfg = cfg['training']
     if (not tcfg.get('pitch_aug', False)) or random.random() >= tcfg.get('pitch_aug_prob', 0.0):
-        return f0, log_melspc, wav, uv, mask
+        return f0, log_melspc, wav, uv, mask, harmonic
     zmin, zmax = tcfg.get('pitch_aug_semitones', [-7, 2])
     z = random.uniform(float(zmin), float(zmax))
     r = 2.0 ** (z / 12.0)
     if abs(z) < 1e-3:
-        return f0, log_melspc, wav, uv, mask
+        return f0, log_melspc, wav, uv, mask, harmonic
     # 1) wav リサンプル: 連続倍率で行う(F.interpolate)。torchaudio.resample は有理数 p/q
     #    しか扱えず、固定 base=100 の22段離散比が縞priorの一因だった——教師データの「固定周波数の線」を
     #    line×{22比} の櫛に複製し、モデルが高域(12-16kHz)の縞として学習しうる(実測で位置がHz一致)。
@@ -52,8 +54,13 @@ def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
     r_actual = Ts / new_wav.shape[-1]                   # ★実際に適用された比。f0 はこれに一致(ラベル=実音)
     Tf_new = new_wav.shape[-1] // mel_hop
     if Tf_new < 8:                                      # 短すぎガード(通常発生しない)
-        return f0, log_melspc, wav, uv, mask
+        return f0, log_melspc, wav, uv, mask, harmonic
     new_wav = new_wav[..., :Tf_new * mel_hop]
+    new_harmonic = None
+    if harmonic is not None:                            # wav と同一の補間(同じ出力長・同じ切り詰め)
+        new_harmonic = torch.nn.functional.interpolate(
+            harmonic.unsqueeze(1), size=Ts_new, mode='linear', align_corners=False).squeeze(1)
+        new_harmonic = new_harmonic[..., :Tf_new * mel_hop]
     # 2) mel 再計算(GPU, preprocess 一致)。[B,M,Tf_new] -> [B,Tf_new,M]
     new_mel = wav_to_mel_torch(new_wav, mel_sr, mel_nfft, mel_hop, mel_win,
                                mel_dim, mel_fmin, mel_fmax).transpose(1, 2)
@@ -68,7 +75,7 @@ def pitch_augment_batch(f0, log_melspc, wav, uv, mask, cfg,
     Ts_new = new_wav.shape[-1]                           # = Tf_new * mel_hop
     new_mask = (_warp(mask.float().unsqueeze(1), Ts_new, 'nearest') > 0.5).squeeze(1) \
         if mask is not None else None
-    return new_f0, new_mel, new_wav, new_uv, new_mask
+    return new_f0, new_mel, new_wav, new_uv, new_mask, new_harmonic
 
 
 def make_random_crop_collate(crop_frames, hop_size: int, min_crop_rms: float = 0.0,
@@ -91,7 +98,9 @@ def make_random_crop_collate(crop_frames, hop_size: int, min_crop_rms: float = 0
 
     def random_crop_collate(batch):
         cropped = []
-        for (f0, melspc, wav, uv) in batch:
+        for item in batch:
+            f0, melspc, wav, uv = item[:4]
+            harmonic = item[4] if len(item) > 4 else None   # hnsep harmonic: wav と同じ位置で切り出す
             T = melspc.shape[0]
             if T < crop_frames:
                 pad_f = crop_frames - T
@@ -99,6 +108,8 @@ def make_random_crop_collate(crop_frames, hop_size: int, min_crop_rms: float = 0
                 uv = np.pad(uv, ((0, 0), (0, pad_f)))
                 melspc = np.pad(melspc, ((0, pad_f), (0, 0)))
                 wav = np.pad(wav, (0, crop_samples - wav.shape[0]))
+                if harmonic is not None:
+                    harmonic = np.pad(harmonic, (0, crop_samples - harmonic.shape[0]))
                 s = 0
             elif min_crop_rms <= 0.0:
                 s = np.random.randint(0, T - crop_frames + 1)
@@ -121,7 +132,10 @@ def make_random_crop_collate(crop_frames, hop_size: int, min_crop_rms: float = 0
             e = s + crop_frames
             ss = s * hop_size
             se = ss + crop_samples
-            cropped.append((f0[:, s:e], melspc[s:e, :], wav[ss:se], uv[:, s:e]))
+            crop = (f0[:, s:e], melspc[s:e, :], wav[ss:se], uv[:, s:e])
+            if harmonic is not None:
+                crop = crop + (harmonic[ss:se],)
+            cropped.append(crop)
         return collate_fn_padd(cropped)
 
     return random_crop_collate
@@ -370,7 +384,9 @@ def _log_linear_spec(npz_path, wav, writer, epoch, cfg, basename):
 def inference(model, npz_path, device, cfg, disable_uv=False):
     """disable_uv=True で v/uv hard gate を無効化(uv=0=全 voiced 扱い)して生成する。
     無声区間で harmonic 源が gate されなくなるので、ccep フィルタが自力で harmonic を
-    抑制できているか(=vuv_dropout 学習の達成度)を可視化・試聴できる。"""
+    抑制できているか(=vuv_dropout 学習の達成度)を可視化・試聴できる。
+    返り値: (wav, real_mel, fake_mel, harmonic_wav, harmonic_mel)。harmonic は NHVSingV3 の
+    sig_harm(同じ合成の harmonic 成分)。非 V3 では harmonic_wav/harmonic_mel は None。"""
     model.eval()
 
     with torch.no_grad():
@@ -387,10 +403,13 @@ def inference(model, npz_path, device, cfg, disable_uv=False):
         log_melspc = torch.Tensor(log_melspc_np).to(device)
         del f0_np, log_melspc_np, uv_np
 
+        harmonic = None
         if isinstance(model, NHVSingV3):
             if disable_uv:
                 uv = torch.zeros_like(uv)   # hard gate 無効化: 無声でも harmonic 源を gate しない
-            synthesized_tensor = model(log_melspc, f0, uv)
+            synthesized_tensor, sig_harm, _ = model.forward_train(log_melspc, f0, uv)
+            harmonic = torch.squeeze(sig_harm).to('cpu').detach().numpy().copy()
+            del sig_harm
         else:
             synthesized_tensor = model(log_melspc, f0)
         del f0, log_melspc
@@ -398,6 +417,14 @@ def inference(model, npz_path, device, cfg, disable_uv=False):
         synthesized = torch.squeeze(synthesized_tensor).to('cpu').detach().numpy().copy()
         del synthesized_tensor
 
+    fake_mel = wav_to_mel_np(synthesized, cfg)
+    harmonic_mel = wav_to_mel_np(harmonic, cfg) if harmonic is not None else None
+    model.train()
+    return synthesized, real_mel, fake_mel, harmonic, harmonic_mel
+
+
+def wav_to_mel_np(wav, cfg):
+    """TensorBoard 表示用の mel([T, mel_dim])。real(npz の log_melspc)と同じ計算・同じスケール。"""
     p_cfg = cfg['preprocess']
     if p_cfg.get('mel_format') == 'diffsinger':
         # preprocess(wav_to_mel)と同一計算: ln(自然対数, clip 1e-5) + center=False + reflect pad
@@ -406,17 +433,17 @@ def inference(model, npz_path, device, cfg, disable_uv=False):
         #   表示され「やたら赤い」ズレになる(音声自体は ln 一貫で正常)。
         win = p_cfg.get('win_size', p_cfg['fft_size'])
         pad = (p_cfg['fft_size'] - p_cfg['hop_size']) // 2
-        yp = np.pad(synthesized.astype(np.float64), (pad, pad), mode='reflect')
+        yp = np.pad(np.asarray(wav, dtype=np.float64), (pad, pad), mode='reflect')
         x_stft = librosa.stft(yp, n_fft=p_cfg['fft_size'], hop_length=p_cfg['hop_size'],
                               win_length=win, window='hann', center=False)
         mel_basis = librosa.filters.mel(sr=p_cfg['sample_rate'], n_fft=p_cfg['fft_size'],
                                         n_mels=p_cfg['mel_dim'], fmin=p_cfg['mel_min'], fmax=p_cfg['mel_max'])
         with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
             _mel = mel_basis.astype(np.float64) @ np.abs(x_stft)
-        fake_mel = np.log(np.maximum(1e-5, _mel)).T.astype(np.float32)
+        return np.log(np.maximum(1e-5, _mel)).T.astype(np.float32)
     else:  # V2 互換（power_to_db）
         S_fake = librosa.feature.melspectrogram(
-            y=synthesized,
+            y=np.asarray(wav, dtype=np.float32),
             sr=p_cfg['sample_rate'],
             n_fft=p_cfg['fft_size'],
             hop_length=p_cfg['hop_size'],
@@ -426,10 +453,7 @@ def inference(model, npz_path, device, cfg, disable_uv=False):
             fmax=p_cfg['mel_max'],
             center=True,
         )
-        fake_mel = librosa.power_to_db(S_fake, ref=1.0).T
-
-    model.train()
-    return synthesized, real_mel, fake_mel
+        return librosa.power_to_db(S_fake, ref=1.0).T
 
 
 def _select_tb_files(npz_paths: list, n_per_singer: int) -> list:
@@ -451,25 +475,74 @@ def _select_tb_files(npz_paths: list, n_per_singer: int) -> list:
     return result
 
 
-def _log_uvoff_and_get_mel(model, npz_path, device, writer, epoch, cfg, basename, sample_rate):
-    """v/uv ゲート無効化(uv=0)版を生成し、その音声を audio/.../fake_uvoff に記録、
-    uv-off の mel を返す(plot/.../fake と mel_diff のデフォルトに使う)。
-    NHVSingV3 の hard gate を外すと無声区間で harmonic 源が gate されないので、
-    ccep フィルタが自力で harmonic を抑制できているか(=学習目標の達成度)が plot で見える:
-      - 抑制できている → 無声区間が real と同じく noise のみ(横線なし)。
-      - できていない   → 無声区間に harmonic(横線 / 試聴でビリつき)が出る。
-    tb_log_uvoff:false / 非 NHVSingV3 / エラー時は None を返し、呼び出し側は gate-on mel に
-    フォールバックする(=従来どおりの fake plot)。"""
-    if not cfg['training'].get('tb_log_uvoff', False) or not isinstance(model, NHVSingV3):
-        return None
-    try:
-        wav_u, _, fake_mel_u = inference(model, npz_path, device, cfg, disable_uv=True)
-    except Exception as e:
-        print(f"  [uvoff] inference error {npz_path}: {e}")
-        return None
-    writer.add_audio('audio/' + basename + '/fake_uvoff',
-                     torch.from_numpy(wav_u).unsqueeze(0), epoch, sample_rate)
-    return fake_mel_u
+def _log_test_file(model, npz_path, device, writer, epoch, cfg, logged_real_mels: set, discriminator=None):
+    """1 つの検証 npz について TensorBoard に記録する(inference_test_data / pinpoint 共通)。
+    audio: real / real_harmonic(hnsep。npz に 'harmonic' があれば)/ fake_uvoff / fake_harmonic。
+    v/uv フラグあり(gate-on)の音声は記録しない(tb_log_uvoff:false か非 V3 のときだけ fallback で fake)。
+    plot : real / real_harmonic / fake(uv-off)/ fake_harmonic、mel_diff は uv-off vs real。
+    fake_harmonic は plot/fake と同じ合成(uv-off)の sig_harm。
+    disc_badness / linear_spec は従来どおり gate-on 波形で描く。"""
+    sample_rate = cfg['preprocess']['sample_rate']
+    vmin, vmax = _mel_vrange(cfg)
+    basename = os.path.splitext(os.path.basename(npz_path))[0]
+
+    wav, real_mel, fake_mel, harm, harm_mel = inference(model, npz_path, device, cfg)   # gate-on
+
+    # real / ground truth は固定なので初回のみ記録(real は run() 冒頭で記録済みのことが多い)
+    if basename not in logged_real_mels:
+        writer.add_figure('plot/' + basename + '/real',
+                          plot_spectrogram(real_mel.T, title=f"real: {basename}", vmin=vmin, vmax=vmax), 0)
+        writer.add_audio('audio/' + basename + '/real',
+                         torch.from_numpy(np.load(npz_path)['wav']).unsqueeze(0), 0, sample_rate)
+        logged_real_mels.add(basename)
+    if basename + '/harmonic' not in logged_real_mels:
+        with np.load(npz_path) as z:
+            real_harm = z['harmonic'] if 'harmonic' in z.files else None
+        if real_harm is not None:
+            writer.add_figure('plot/' + basename + '/real_harmonic',
+                              plot_spectrogram(wav_to_mel_np(real_harm, cfg).T,
+                                               title=f"real harmonic (hnsep): {basename}", vmin=vmin, vmax=vmax), 0)
+            writer.add_audio('audio/' + basename + '/real_harmonic',
+                             torch.from_numpy(real_harm).unsqueeze(0), 0, sample_rate)
+        logged_real_mels.add(basename + '/harmonic')
+
+    # plot/diff/harmonic は uv-off 版をデフォルトに(無声 harmonic の自力抑制を可視化)。
+    # NHVSingV3 の hard gate を外すと無声区間で harmonic 源が gate されないので、ccep フィルタが
+    # 自力で harmonic を抑制できているか(=学習目標の達成度)が見える。無効時は gate-on にフォールバック。
+    fake_tag, fake_mel_plot, harm_plot, harm_mel_plot = 'fake', fake_mel, harm, harm_mel
+    uvoff_ok = False
+    if cfg['training'].get('tb_log_uvoff', False) and isinstance(model, NHVSingV3):
+        try:
+            wav_u, _, fake_mel_plot, harm_plot, harm_mel_plot = inference(model, npz_path, device, cfg,
+                                                                          disable_uv=True)
+            writer.add_audio('audio/' + basename + '/fake_uvoff',
+                             torch.from_numpy(wav_u).unsqueeze(0), epoch, sample_rate)
+            fake_tag, uvoff_ok = 'fake uv-off', True
+        except Exception as e:
+            print(f"  [uvoff] inference error {npz_path}: {e}")
+            fake_mel_plot, harm_plot, harm_mel_plot = fake_mel, harm, harm_mel
+    if not uvoff_ok:
+        writer.add_audio('audio/' + basename + '/fake',
+                         torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
+
+    writer.add_figure('plot/' + basename + '/fake',
+                      plot_spectrogram(fake_mel_plot.T, title=f"{fake_tag}: {basename}  ep{epoch}",
+                                       vmin=vmin, vmax=vmax), epoch)
+    if harm_plot is not None:
+        writer.add_figure('plot/' + basename + '/fake_harmonic',
+                          plot_spectrogram(harm_mel_plot.T, title=f"{fake_tag} harmonic: {basename}  ep{epoch}",
+                                           vmin=vmin, vmax=vmax), epoch)
+        writer.add_audio('audio/' + basename + '/fake_harmonic',
+                         torch.from_numpy(harm_plot).unsqueeze(0), epoch, sample_rate)
+
+    min_T = min(real_mel.shape[0], fake_mel_plot.shape[0])
+    diff = fake_mel_plot[:min_T] - real_mel[:min_T]  # (T, mel_dim)
+    writer.add_figure('mel_diff/' + basename,
+                      plot_mel_diff(diff.T, title=f"diff: {basename}  ep{epoch}",
+                                    vmax=(5.0 if cfg['preprocess'].get('mel_format') == 'diffsinger' else 20.0)), epoch)
+
+    _log_disc_badness(discriminator, npz_path, wav, real_mel, device, writer, epoch, cfg, basename)
+    _log_linear_spec(npz_path, wav, writer, epoch, cfg, basename)
 
 
 def inference_pinpoint_files(model, device, writer, epoch, cfg, logged_real_mels: set, discriminator=None):
@@ -480,47 +553,14 @@ def inference_pinpoint_files(model, device, writer, epoch, cfg, logged_real_mels
     if not pinpoint_paths:
         return
 
-    sample_rate = cfg['preprocess']['sample_rate']
     for npz_path in pinpoint_paths:
         if not os.path.exists(npz_path):
             print(f"  [pinpoint] not found, skip: {npz_path}")
             continue
         try:
-            wav, real_mel, fake_mel = inference(model, npz_path, device, cfg)
+            _log_test_file(model, npz_path, device, writer, epoch, cfg, logged_real_mels, discriminator)
         except Exception as e:
             print(f"  [pinpoint] inference error {npz_path}: {e}")
-            continue
-
-        basename = os.path.splitext(os.path.basename(npz_path))[0]
-
-        if basename not in logged_real_mels:
-            writer.add_figure('plot/' + basename + '/real',
-                              plot_spectrogram(real_mel.T, title=f"real: {basename}",
-                                               vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), 0)
-            real_wav = np.load(npz_path)['wav']
-            writer.add_audio('audio/' + basename + '/real',
-                             torch.from_numpy(real_wav).unsqueeze(0), 0, sample_rate)
-            logged_real_mels.add(basename)
-
-        # plot/diff は uv-off 版をデフォルトに(無声 harmonic の自力抑制を可視化)。
-        # uv-off 音声は audio/.../fake_uvoff に記録され、uv-off mel が返る。無効時は gate-on にフォールバック。
-        fake_mel_u = _log_uvoff_and_get_mel(model, npz_path, device, writer, epoch, cfg, basename, sample_rate)
-        fake_mel_plot = fake_mel_u if fake_mel_u is not None else fake_mel
-        _fake_tag = 'fake uv-off' if fake_mel_u is not None else 'fake'
-        writer.add_figure('plot/' + basename + '/fake',
-                          plot_spectrogram(fake_mel_plot.T, title=f"{_fake_tag}: {basename}  ep{epoch}",
-                                           vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), epoch)
-        writer.add_audio('audio/' + basename + '/fake',
-                         torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
-
-        min_T = min(real_mel.shape[0], fake_mel_plot.shape[0])
-        diff = fake_mel_plot[:min_T] - real_mel[:min_T]  # (T, mel_dim)
-        writer.add_figure('mel_diff/' + basename,
-                          plot_mel_diff(diff.T, title=f"diff: {basename}  ep{epoch}",
-                                        vmax=(5.0 if cfg['preprocess'].get('mel_format') == 'diffsinger' else 20.0)), epoch)
-
-        _log_disc_badness(discriminator, npz_path, wav, real_mel, device, writer, epoch, cfg, basename)
-        _log_linear_spec(npz_path, wav, writer, epoch, cfg, basename)
 
 
 def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set, discriminator=None):
@@ -531,51 +571,13 @@ def inference_test_data(model, device, writer, epoch, cfg, logged_real_mels: set
     if n_per_singer > 0:
         all_npz_paths = _select_tb_files(all_npz_paths, n_per_singer)
 
-    # inference wav 廃止に伴い save_dir 作成も不要（試聴は tensorboard の add_audio で行う）。
-    # inference_output_base_dir = Path(cfg['training'].get('inference_output_dir', 'dataset/inference'))
-    # save_dir = inference_output_base_dir / f"{epoch}"
-    # save_dir.mkdir(parents=True, exist_ok=True)
-
-    sample_rate = cfg['preprocess']['sample_rate']
-    for i, npz_path in enumerate(all_npz_paths):
-        wav, real_mel, fake_mel = inference(model, npz_path, device, cfg)
-
-        basename = os.path.splitext(os.path.basename(npz_path))[0]
-
-        # real_mel / ground truth audio は固定なので初回のみ記録
-        if basename not in logged_real_mels:
-            writer.add_figure('plot/' + basename + '/real',
-                              plot_spectrogram(real_mel.T, title=f"real: {basename}",
-                                               vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), 0)
-            real_wav = np.load(npz_path)['wav']
-            writer.add_audio('audio/' + basename + '/real',
-                             torch.from_numpy(real_wav).unsqueeze(0), 0, sample_rate)
-            logged_real_mels.add(basename)
-
-        # plot/diff は uv-off 版をデフォルトに(無声 harmonic の自力抑制を可視化)。
-        # uv-off 音声は audio/.../fake_uvoff に記録され、uv-off mel が返る。無効時は gate-on にフォールバック。
-        fake_mel_u = _log_uvoff_and_get_mel(model, npz_path, device, writer, epoch, cfg, basename, sample_rate)
-        fake_mel_plot = fake_mel_u if fake_mel_u is not None else fake_mel
-        _fake_tag = 'fake uv-off' if fake_mel_u is not None else 'fake'
-        writer.add_figure('plot/' + basename + '/fake',
-                          plot_spectrogram(fake_mel_plot.T, title=f"{_fake_tag}: {basename}  ep{epoch}",
-                                           vmin=_mel_vrange(cfg)[0], vmax=_mel_vrange(cfg)[1]), epoch)
-        writer.add_audio('audio/' + basename + '/fake',
-                         torch.from_numpy(wav).unsqueeze(0), epoch, sample_rate)
-
-        min_T = min(real_mel.shape[0], fake_mel_plot.shape[0])
-        diff = fake_mel_plot[:min_T] - real_mel[:min_T]  # (T, mel_dim)
-        writer.add_figure('mel_diff/' + basename,
-                          plot_mel_diff(diff.T, title=f"diff: {basename}  ep{epoch}",
-                                        vmax=(5.0 if cfg['preprocess'].get('mel_format') == 'diffsinger' else 20.0)), epoch)
-
-        _log_disc_badness(discriminator, npz_path, wav, real_mel, device, writer, epoch, cfg, basename)
-        _log_linear_spec(npz_path, wav, writer, epoch, cfg, basename)
-
-        # inference wav の書き出しは廃止（試聴は tensorboard の add_audio で可能）。
-        # Google Drive(FUSE) では libsndfile 書き込みが System error になる問題も回避できる。
-        # save_path = save_dir / f"{i:03d}.wav"
-        # sf.write(save_path, wav, sample_rate)
+    # inference wav の書き出しは廃止（試聴は tensorboard の add_audio で可能）。
+    # Google Drive(FUSE) では libsndfile 書き込みが System error になる問題も回避できる。
+    for npz_path in all_npz_paths:
+        try:
+            _log_test_file(model, npz_path, device, writer, epoch, cfg, logged_real_mels, discriminator)
+        except Exception as e:                       # 1 ファイルの不具合で学習を止めない(pinpoint と同じ)
+            print(f"  [test] inference error {npz_path}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -726,9 +728,21 @@ def run(args, force_restart: bool = False):
         print(f"v/uv dropout: prob={vuv_dropout_prob} (確率で uv gate 無効化=無声harmonic抑制学習+uv誤りロバスト)")
     if amp_augment:
         print(f"amp_augment: enabled, range={amp_aug_range}")
+    # hnsep 成分 mel loss: NHVSing の sig_harm / sig_noise を、hnsep で分離した harmonic /
+    # (wav - harmonic) の mel に寄せる補助損失。npz に 'harmonic' が必要(tools/add_hnsep_harmonic.py)。
+    # 既定(scale 0)では無効で、npz の 'harmonic' も読まない。hn_loss_start(既定 -1)を過ぎた epoch から効く
+    # (adversarial_start / envelope_start と同じく epoch > start)。データは最初から 'harmonic' 入りが必要。
+    hn_harmonic_mel_scale = cfg['training'].get('hn_harmonic_mel_scale', 0.0)
+    hn_noise_mel_scale = cfg['training'].get('hn_noise_mel_scale', 0.0)
+    hn_loss_start = cfg['training'].get('hn_loss_start', -1)
+    use_hn_loss = hn_harmonic_mel_scale > 0 or hn_noise_mel_scale > 0
+    if use_hn_loss:
+        assert use_v3, "hnsep 成分 mel loss は NHVSingV3 系(forward_train が sig_harm/sig_noise を返す)専用"
+        print(f"hnsep component mel loss: harmonic={hn_harmonic_mel_scale} noise={hn_noise_mel_scale}"
+              f" (epoch > {hn_loss_start})")
     train_dataset = VocoderDataset(dataset_dir=cfg['training']['train_dir'], hop_size=hop_size,
                                    augment=amp_augment, amp_aug_range=amp_aug_range,
-                                   diffsinger_mel=use_v3)
+                                   diffsinger_mel=use_v3, load_harmonic=use_hn_loss)
     crop_frames = cfg['training'].get('crop_frames', cfg['training'].get('max_train_frames', None))
     min_crop_rms = float(cfg['training'].get('min_crop_rms', 0.0))   # 0 = disabled (near-silent crop rejection)
     collate_train = make_random_crop_collate(crop_frames, hop_size=hop_size, min_crop_rms=min_crop_rms)
@@ -831,6 +845,26 @@ def run(args, force_restart: bool = False):
         else:
             print("Starting new training (no checkpoint found).")
 
+    # --- 仕上げ(polish): polish_start を過ぎた epoch から、lr_g / lr_d / lr_d_grp2 を polish_lr_scale 倍にする ---
+    # 既定(polish_start -1)では何もしない。epoch ごとに config の値から決め直すので、途中の ckpt から再開しても
+    # その epoch に合った lr になる(resume 時の config 値での上書きの後に効く)。
+    polish_start = cfg['training'].get('polish_start', -1)
+    polish_lr_scale = float(cfg['training'].get('polish_lr_scale', 1.0))
+    use_polish = polish_start >= 0 and polish_lr_scale != 1.0
+    if use_polish:
+        print(f"polish: epoch > {polish_start} で lr を x{polish_lr_scale}")
+
+    def set_lr_scale(scale):
+        for pg in optimizer_g.param_groups:
+            pg['lr'] = cfg['training']['lr_g'] * scale
+        _lr_d_base = cfg['training']['lr_d']
+        _lr_d_bases = [_lr_d_base, cfg['training'].get('lr_d_grp2', _lr_d_base)]
+        for i, pg in enumerate(optimizer_d.param_groups):
+            pg['lr'] = _lr_d_bases[min(i, 1)] * scale
+        print(f"  lr x{scale}: lr_g={optimizer_g.param_groups[0]['lr']:.2e} "
+              f"lr_d={[round(pg['lr'], 8) for pg in optimizer_d.param_groups]}")
+    cur_lr_scale = None
+
     # --- Noise branch curriculum ---
     freeze_until = cfg['training'].get('noise_branch_freeze_epochs', 0)
     if freeze_until > 0 and start_epoch < freeze_until:
@@ -930,11 +964,20 @@ def run(args, force_restart: bool = False):
         # noise_std=0 でノイズ枝を無効化（freeze 期間中は white noise が harmonic を妨害しないように）
         effective_noise_std = 0.0 if (freeze_until > 0 and epoch < freeze_until) else -1.0
 
+        if use_polish:
+            _scale = polish_lr_scale if epoch > polish_start else 1.0
+            if _scale != cur_lr_scale:
+                print(f"[epoch {epoch}] " + ("polish" if epoch > polish_start else "base lr"))
+                set_lr_scale(_scale)
+                cur_lr_scale = _scale
+        hn_active = use_hn_loss and epoch > hn_loss_start
+
         tic = time.time()
         stft_loss_epoch, loss_g_epoch = 0, 0
         loss_real_epoch, loss_fake_epoch, loss_d_epoch, loss_f_epoch, loss_env_epoch = 0, 0, 0, 0, 0
         loss_harm_pen_epoch = 0
         loss_mel_epoch = 0.0
+        loss_hn_harm_epoch, loss_hn_noise_epoch = 0.0, 0.0
         # sub-disc 群別の寄与（adv=generator を騙す側, d=disc real+fake）。
         # grp1=MSD, grp2=複素STFT or MPD, wn=WaveNet(自前 disc のみ)。ラベルは sub_labels。
         adv_msd_epoch, adv_grp2_epoch, adv_wn_epoch = 0.0, 0.0, 0.0
@@ -951,8 +994,9 @@ def run(args, force_restart: bool = False):
 
         n_batches = len(train_loader)
 
-        for batch_idx, (f0, log_melspc, wav, uv, mask) in enumerate(
-                tqdm(train_loader, desc=f"Epoch {epoch}")):
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
+            f0, log_melspc, wav, uv, mask = batch[:5]
+            harmonic = torch.from_numpy(batch[5]).float().to(device) if hn_active else None
 
             # accumulation boundary (always step on the last batch too)
             is_update_step = ((batch_idx + 1) % accum_steps == 0) or \
@@ -966,9 +1010,19 @@ def run(args, force_restart: bool = False):
 
             # RefineGAN流 pitch augmentation(per-batch, GPU)。既定OFF/非発動でビット不変。
             # 発動時: wav をリサンプル→mel再計算→f0×r→uv/mask 時間ワープ(バッチ長が変動)。
-            f0, log_melspc, wav, uv, mask = pitch_augment_batch(
+            # harmonic(hnsep)も wav と同一の補間をかける(線形なので分解が保たれる)。
+            f0, log_melspc, wav, uv, mask, harmonic = pitch_augment_batch(
                 f0, log_melspc, wav, uv, mask, cfg,
-                mel_sr, mel_nfft, mel_hop, mel_win, mel_dim, mel_fmin, mel_fmax)
+                mel_sr, mel_nfft, mel_hop, mel_win, mel_dim, mel_fmin, mel_fmax, harmonic=harmonic)
+
+            # hnsep 成分の正解 mel(勾配不要)。noise は wav - harmonic。
+            if hn_active:
+                with torch.no_grad():
+                    hn_harm_mel = wav_to_mel_torch(harmonic, mel_sr, mel_nfft, mel_hop, mel_win,
+                                                   mel_dim, mel_fmin, mel_fmax)
+                    hn_noise_mel = wav_to_mel_torch(wav - harmonic, mel_sr, mel_nfft, mel_hop, mel_win,
+                                                    mel_dim, mel_fmin, mel_fmax)
+                del harmonic
 
             # v/uv dropout: 確率 vuv_dropout_prob で uv gate を無効化(全 voiced 扱い)。
             # 大半(1-p)は gate 有効で「無声区間で harmonic を鳴らさない」を学習(無声で
@@ -983,7 +1037,12 @@ def run(args, force_restart: bool = False):
             # Built once here so it survives `del log_melspc` in the disc update.
             mel_cond = log_melspc.transpose(1, 2)
 
-            if use_v3:
+            sig_harm = sig_noise = None
+            if use_v3 and hn_active:
+                # 成分 mel loss 用に sig_harm / sig_noise(clamp 前の生成分)も受け取る。計算量は forward と同じ。
+                est_source, sig_harm, sig_noise = model.forward_train(
+                    log_melspc, f0, uv_model, noise_std=effective_noise_std)
+            elif use_v3:
                 # V3: harmonic を uv で hard gate。harmonic_penalty は不要(scale=0)。
                 est_source = model(log_melspc, f0, uv_model, noise_std=effective_noise_std)
             elif harmonic_penalty_scale > 0:
@@ -1136,6 +1195,20 @@ def run(args, force_restart: bool = False):
                     total_loss = total_loss + m_loss * mel_loss_scale / accum_steps
                     del m_loss
 
+                # hnsep 成分 mel loss(補助)。sig_harm / sig_noise をそれぞれ hnsep の harmonic /
+                # (wav - harmonic) の mel に寄せる。hnsep を絶対視しないため重みは主 mel loss より小さく。
+                if hn_active:
+                    with torch.amp.autocast('cuda', enabled=False):
+                        hn_h_loss = mel_loss_fn(sig_harm.float(), hn_harm_mel, mel_sr, mel_nfft, mel_hop,
+                                                mel_win, mel_dim, mel_fmin, mel_fmax, mask=mask)
+                        hn_n_loss = mel_loss_fn(sig_noise.float(), hn_noise_mel, mel_sr, mel_nfft, mel_hop,
+                                                mel_win, mel_dim, mel_fmin, mel_fmax, mask=mask)
+                    loss_hn_harm_epoch += hn_h_loss.item()
+                    loss_hn_noise_epoch += hn_n_loss.item()
+                    total_loss = total_loss + (hn_h_loss * hn_harmonic_mel_scale
+                                               + hn_n_loss * hn_noise_mel_scale) / accum_steps
+                    del hn_h_loss, hn_n_loss, hn_harm_mel, hn_noise_mel
+
                 if envelope_scale > 0 and epoch > envelope_start:
                     env_loss = envelope_loss_fn(
                         est_n, wav_n, envelope_kernel, envelope_stride,
@@ -1216,8 +1289,7 @@ def run(args, force_restart: bool = False):
                 optimizer_g.zero_grad()
 
             del est_source, est_source_raw, wav, wav_n, est_n, uv, mel_cond, log_melspc, f0, mask
-            if harmonic_penalty_scale > 0:
-                del sig_harm, sig_noise
+            del sig_harm, sig_noise
 
         toc = time.time()
 
@@ -1230,6 +1302,8 @@ def run(args, force_restart: bool = False):
             'loss_d', round(loss_d_epoch, 3),
             'loss_f', round(loss_f_epoch, 3),
             'loss_mel', round(loss_mel_epoch, 3),
+            *(('loss_hn_harm', round(loss_hn_harm_epoch / max(1, n_batches), 4),
+               'loss_hn_noise', round(loss_hn_noise_epoch / max(1, n_batches), 4)) if hn_active else ()),
             'loss_env', round(loss_env_epoch, 3),
             'loss_harm_pen', round(loss_harm_pen_epoch, 5),
             '| adv_' + sub_labels[0], round(adv_msd_epoch / max(1, n_batches), 3),
@@ -1263,6 +1337,11 @@ def run(args, force_restart: bool = False):
             writer.add_scalar(f'train/d_{sub_labels[2]}', d_wn_epoch / n, epoch)
         if mel_loss_scale > 0:
             writer.add_scalar('train/loss_mel', loss_mel_epoch / n, epoch)
+        if hn_active:
+            writer.add_scalar('train/loss_hn_harm', loss_hn_harm_epoch / n, epoch)
+            writer.add_scalar('train/loss_hn_noise', loss_hn_noise_epoch / n, epoch)
+        if use_polish:
+            writer.add_scalar('train/lr_g', optimizer_g.param_groups[0]['lr'], epoch)
         if envelope_scale > 0:
             writer.add_scalar('train/loss_env', loss_env_epoch / n, epoch)
         if harmonic_penalty_scale > 0:
