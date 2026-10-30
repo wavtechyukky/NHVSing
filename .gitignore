@@ -55,6 +55,9 @@ encodec-main/
 
 # Development notes (not for public)
 CHANGELOG.md
+# Local Colab configs of the actual v3.3 run (config_v3_3.yaml describes the same run as one recipe)
+config_v3_hnsep_ft1000.yaml
+config_v3_hnsep_ft1100_colab.yaml
 
 # Old reference code
 20260302/

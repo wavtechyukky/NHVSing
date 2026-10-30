@@ -6,9 +6,9 @@
 
 [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf)を、**歌声合成向けにチューニングした**モデルです。PyTorchで実装されており、JITコンパイルおよび単一ファイルONNXエクスポートに対応しています。
 
-本リポジトリには最新の **NHVSing V3 / V3X**（音質改善版のV3.2・V3.2Xを推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。V3.1は特定の周波数で、フレーム単位で波形の位相が反転し、隣接するフレームの波形を打ち消す動作が起こっていたため非推奨です。
+本リポジトリには最新の **NHVSing V3 / V3X**（調波と雑音の分担を改善したV3.3・V3.3Xを推奨）と、レガシーの **NHVSing**（V1・単一話者）/ **NHVSingV2**（多話者）が含まれます。V3.1は特定の周波数で、フレーム単位で波形の位相が反転し、隣接するフレームの波形を打ち消す動作が起こっていたため非推奨です。
 
-🎧 **試聴はこちら → [NHVSing V3.2 デモページ](https://wavtechyukky.github.io/NHVSing/v3_2.html)**（最新の配布ウェイト。NSF-HiFiGANとの copy-synthesis聴き比べ）
+🎧 **試聴はこちら → [NHVSing V3.2 デモページ](https://wavtechyukky.github.io/NHVSing/v3_2.html)**（V3.2の配布ウェイト。NSF-HiFiGANとの copy-synthesis聴き比べ。V3.3を含む数値の比較は[V3.3の節](#v33--最新の配布ウェイト2026-10)）
 &nbsp;·&nbsp; [V3 デモページ](https://wavtechyukky.github.io/NHVSing/v3.html)（RTF・モデルサイズの比較、DiffSinger音響モデルでの歌声合成）
 
 ***
@@ -31,9 +31,33 @@
 | **`NHVSingV3`** | **最終モデル（hop256 native）** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **V3 の hop512 入力版** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
-> V3.2 も同じ `NHVSingV3` / `NHVSingV3X` を使い、config だけ **`config_v3_2.yaml`**（`ltv_filter.ola_mode: hann`）に差し替えます。
+> V3.2 も同じ `NHVSingV3` / `NHVSingV3X` を使い、config だけ **`config_v3_2.yaml`**（`ltv_filter.ola_mode: hann`）に差し替えます。V3.3 の config は **`config_v3_3.yaml`**（モデルの部分は V3.2 と同一）です。
 
-### V3.2 — 最新の配布ウェイト（2026-09）
+### V3.3 — 最新の配布ウェイト（2026-10）
+
+**V3.2.1**（`exported_models/v3_2_1/`）は、V3.2 と同じ設定で学習を ep1020 まで続けたものです。
+
+**V3.3** は、V3.2 の設定で ep1000 まで学習したあと、補助の損失を加えて ep1300 まで続け、最後に学習率を 1/10 にして ep1320 まで仕上げたものです。[hifisampler](https://github.com/openhachimi/hifisampler) でも使われている調波/雑音分離のネットワーク（hnsep。非商用利用可、開発者に確認済み）で学習音声を調波と雑音に分け、NHVSing の調波の出力と分離した調波、雑音の出力と残り（元の波形 − 調波）の、それぞれの mel の L1 損失を取ることで、調波と雑音の分担がより適切になるようにしました（重みは主の mel 損失 30 に対して 2 と 1）。ゼロ位相気味の刺々しい波形が減ってより人間的な声になり、デモページの全ての音声（11 本）で V3.2.1 より mel-L1 が改善しました。構造と入出力は V3.2 と同じなので、ONNX はそのまま差し替えられます。
+
+デモページの 11 本（どれも NHVSing の学習に使っていない検証用の音声）をコピー合成した mel-L1（正解との ln-mel の差の絶対値の平均。音量をそろえてから測る。小さいほど正解に近い）:
+
+| | 全帯域 | 0–2 kHz | 2–6 kHz | 6–16 kHz | NSF-HiFiGAN より小さい本数 |
+|---|---|---|---|---|---|
+| V3.2 | 0.302 | 0.368 | 0.273 | 0.220 | 0 / 11 |
+| V3.2.1 | 0.275 | 0.352 | 0.243 | 0.179 | 2 / 11 |
+| **V3.3** | **0.272** | **0.350** | **0.239** | **0.178** | 2 / 11 |
+| NSF-HiFiGAN | 0.246 | 0.292 | 0.244 | 0.170 | — |
+
+差は V3.2 → V3.2.1 で大きく縮まり、2–6 kHz では V3.2.1 から NSF-HiFiGAN を下回っています。残る差のほとんどは 0–2 kHz です。mel-L1 は聴感とは一致しないので、目安として見てください（NSF-HiFiGAN の学習データにこれらの音声が含まれているかは不明です）。
+
+配布ファイルは `exported_models/v3_3/`（標準の `export.py` 出力をリネームしたもの。下記のメモリ修正済みの書き出し）:
+
+- **`nhv_v3_3.pth`** — V3/V3X 共有の重み
+- **`nhv_v3_3.onnx` / `nhv_v3_3x.onnx`** — 重み内蔵の単一ファイル ONNX（I/O 契約は `nhv_v3.onnx` / `nhv_v3x.onnx` と同一）
+
+学習レシピは **`config_v3_3.yaml`**。学習データの npz には、先に `tools/add_hnsep_harmonic.py` で hnsep の調波を書き足しておきます（補助の損失を使わない設定では読みません）。
+
+### V3.2（2026-09）
 
 **V3.2** のV3からの変更点は以下のとおりです。アーキテクチャは不変（クラス・モデルサイズ・RTFは同じ）で、変わったのは一部のバグ修正と学習の仕方です:
 
@@ -151,7 +175,7 @@ python export.py --config config_v3.yaml --ckpt <weights.ckpt> --out exported_mo
 - **`nhv_v3.pth`** — V3/V3X共有の重み（`NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))` でロード可）。**V3Xは重みをV3と共有するので `.pth` は無し**（onnxのみ）。
 - **`nhv_v3.onnx` / `nhv_v3x.onnx`** — 各 **NN + DSP全部入りの単一ONNX**（重み内蔵・`.onnx.data` 等の外部ファイル無し・ONNXRuntimeのみで推論可能。V1/V2の `full_vocoder.onnx` と同形式）。入力 `mel` / `f0` / `uv` → 出力 `waveform` / `harmonic` / `noise` の3出力で、`clamp(harmonic + noise) == waveform`。入力長Tは動的（任意長）。
 
-> **V3.2** を出力するときは `--config config_v3_2.yaml` を指定し、出力された `nhv_v3.*` を `nhv_v3_2.*` にリネームします（配布物 `exported_models/v3_2/` はこの手順で作成）。
+> **V3.2** を出力するときは `--config config_v3_2.yaml` を指定し、出力された `nhv_v3.*` を `nhv_v3_2.*` にリネームします（配布物 `exported_models/v3_2/` はこの手順で作成）。**V3.3** も同様に `--config config_v3_3.yaml` で出力し、`nhv_v3_3.*` にリネームしています。
 
 **推論（Python）**:
 ```python
@@ -409,6 +433,11 @@ NHVSingV2では学習時に音量を0.5〜2.0倍（log-uniform）でランダム
 *   [https://github.com/xcmyz/FastVocoder/tree/main](https://github.com/xcmyz/FastVocoder/tree/main)
 *   [https://github.com/zjlww/dsp](https://github.com/zjlww/dsp)
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
+
+V3.3 の学習では、[DiffSinger](https://github.com/openvpi/DiffSinger) の調波/雑音分離のために学習された Vocal Remover のモデル（hnsep）を使わせていただきました。hifisampler でも使われているモデルです。
+
+*   [https://github.com/yxlllc/vocal-remover/releases/tag/hnsep_240512](https://github.com/yxlllc/vocal-remover/releases/tag/hnsep_240512)
+*   [https://github.com/openvpi/DiffSinger](https://github.com/openvpi/DiffSinger)
 
 ## 使用した歌声データベース
 

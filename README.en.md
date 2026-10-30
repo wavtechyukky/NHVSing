@@ -6,9 +6,9 @@
 
 A [Neural Homomorphic Vocoder](https://www.isca-archive.org/interspeech_2020/liu20_interspeech.pdf) model **tuned for singing voice synthesis**. Implemented in PyTorch with support for JIT compilation and single-file ONNX export.
 
-This repository contains the latest **NHVSing V3 / V3X** (the quality-improved **V3.2 / V3.2X** are recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker). V3.1 is deprecated: at certain frequencies it exhibited a per-frame waveform phase flip in which a frame's waveform was cancelled by the neighbouring frame.
+This repository contains the latest **NHVSing V3 / V3X** (**V3.3 / V3.3X**, with a better harmonic/noise split, are recommended), plus the legacy **NHVSing** (V1, single-speaker) and **NHVSingV2** (multi-speaker). V3.1 is deprecated: at certain frequencies it exhibited a per-frame waveform phase flip in which a frame's waveform was cancelled by the neighbouring frame.
 
-🎧 **Listen → [NHVSing V3.2 Demo Page](https://wavtechyukky.github.io/NHVSing/v3_2.html)** (the latest released weights — copy-synthesis vs NSF-HiFiGAN)
+🎧 **Listen → [NHVSing V3.2 Demo Page](https://wavtechyukky.github.io/NHVSing/v3_2.html)** (the V3.2 weights — copy-synthesis vs NSF-HiFiGAN; for numbers including V3.3 see the [V3.3 section](#v33--latest-released-weights-2026-10))
 &nbsp;·&nbsp; [V3 Demo Page](https://wavtechyukky.github.io/NHVSing/v3.html) (RTF & model-size figures, singing synthesis from DiffSinger acoustic models)
 
 ***
@@ -31,9 +31,33 @@ This repository contains the latest **NHVSing V3 / V3X** (the quality-improved *
 | **`NHVSingV3`** | **final model (hop256 native)** | **`config_v3.yaml`** |
 | **`NHVSingV3X`** | **hop512-input variant of V3** | `config_v3.yaml` + `ltv_filter.use_v3x: true` |
 
-> V3.2 uses the same `NHVSingV3` / `NHVSingV3X` classes; only the config changes to **`config_v3_2.yaml`** (`ltv_filter.ola_mode: hann`).
+> V3.2 uses the same `NHVSingV3` / `NHVSingV3X` classes; only the config changes to **`config_v3_2.yaml`** (`ltv_filter.ola_mode: hann`). V3.3 uses **`config_v3_3.yaml`** (its model section is identical to V3.2's).
 
-### V3.2 — latest released weights (2026-09)
+### V3.3 — latest released weights (2026-10)
+
+**V3.2.1** (`exported_models/v3_2_1/`) continues V3.2's training with the same settings up to ep1020.
+
+**V3.3** trains with V3.2's settings to ep1000, continues to ep1300 with an auxiliary loss, and finishes at 1/10 learning rate up to ep1320. The training audio is split into harmonic and noise parts by the harmonic/noise separation network also used in [hifisampler](https://github.com/openhachimi/hifisampler) (hnsep; non-commercial use is fine, confirmed with its developer). An L1 loss on the mel then pulls NHVSing's harmonic output toward the separated harmonic part, and its noise output toward the rest (waveform − harmonic), so that the two branches split the sound more appropriately (weights 2 and 1, against 30 for the main mel loss). The near-zero-phase, spiky waveforms became rarer and the voice sounds more human, and mel-L1 improved over V3.2.1 on every clip of the demo page (11 clips). The architecture and the inputs/outputs are the same as V3.2, so the ONNX is a drop-in replacement.
+
+mel-L1 of copy-synthesis on the 11 demo-page clips (validation audio, none used to train NHVSing). It is the mean absolute ln-mel difference from the ground truth, measured after matching loudness; lower is closer:
+
+| | all bands | 0–2 kHz | 2–6 kHz | 6–16 kHz | clips below NSF-HiFiGAN |
+|---|---|---|---|---|---|
+| V3.2 | 0.302 | 0.368 | 0.273 | 0.220 | 0 / 11 |
+| V3.2.1 | 0.275 | 0.352 | 0.243 | 0.179 | 2 / 11 |
+| **V3.3** | **0.272** | **0.350** | **0.239** | **0.178** | 2 / 11 |
+| NSF-HiFiGAN | 0.246 | 0.292 | 0.244 | 0.170 | — |
+
+Most of the gap closed from V3.2 to V3.2.1, and from V3.2.1 on NHVSing is below NSF-HiFiGAN at 2–6 kHz. Almost all of the remaining gap is at 0–2 kHz. mel-L1 does not match perception, so treat it as a rough guide (whether NSF-HiFiGAN's training data contains these clips is unknown).
+
+Released files in `exported_models/v3_3/` (standard `export.py` outputs, renamed; exported after the memory fix below):
+
+- **`nhv_v3_3.pth`** — V3/V3X shared weights
+- **`nhv_v3_3.onnx` / `nhv_v3_3x.onnx`** — self-contained single-file ONNX, same I/O contract as `nhv_v3.onnx` / `nhv_v3x.onnx`
+
+The training recipe is **`config_v3_3.yaml`**. Run `tools/add_hnsep_harmonic.py` on the training npz files first to add the hnsep harmonic (configs without the auxiliary loss never read it).
+
+### V3.2 (2026-09)
 
 **V3.2** is the successor to V3 (V3.1 is deprecated). The architecture is unchanged (same classes, same model size, same RTF); what changed is a few fixes and how it was trained:
 
@@ -151,7 +175,7 @@ By default this writes to `exported_models/v3/`:
 - **`nhv_v3.pth`** — shared weights for V3/V3X (load with `NHVSingV3(vc, lc).load_state_dict(torch.load('nhv_v3.pth'))`). **V3X shares these weights, so it has no `.pth`** (ONNX only).
 - **`nhv_v3.onnx` / `nhv_v3x.onnx`** — each a **single self-contained ONNX** (NN + DSP, weights embedded — no external `.onnx.data`; runnable with ONNX Runtime alone, same format as V1/V2's `full_vocoder.onnx`). Inputs `mel` / `f0` / `uv` → 3 outputs `waveform` / `harmonic` / `noise`, with `clamp(harmonic + noise) == waveform`. The time length T is dynamic (any length).
 
-> To export **V3.2**, pass `--config config_v3_2.yaml` and rename the resulting `nhv_v3.*` to `nhv_v3_2.*` (the released `exported_models/v3_2/` was built this way).
+> To export **V3.2**, pass `--config config_v3_2.yaml` and rename the resulting `nhv_v3.*` to `nhv_v3_2.*` (the released `exported_models/v3_2/` was built this way). **V3.3** was exported the same way with `--config config_v3_3.yaml` and renamed to `nhv_v3_3.*`.
 
 **Inference (Python)**:
 ```python
@@ -409,6 +433,11 @@ This repository is based on the following papers and repositories published by L
 *   [https://github.com/xcmyz/FastVocoder/tree/main](https://github.com/xcmyz/FastVocoder/tree/main)
 *   [https://github.com/zjlww/dsp](https://github.com/zjlww/dsp)
 *   [https://pypi.org/project/neural-homomorphic-vocoder/](https://pypi.org/project/neural-homomorphic-vocoder/)
+
+Training V3.3 used the Vocal Remover model trained for harmonic/noise separation in [DiffSinger](https://github.com/openvpi/DiffSinger) (hnsep), which hifisampler also uses.
+
+*   [https://github.com/yxlllc/vocal-remover/releases/tag/hnsep_240512](https://github.com/yxlllc/vocal-remover/releases/tag/hnsep_240512)
+*   [https://github.com/openvpi/DiffSinger](https://github.com/openvpi/DiffSinger)
 
 ## Singing Voice Databases Used
 
