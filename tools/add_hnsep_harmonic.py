@@ -6,6 +6,9 @@ Each input npz is copied to --out_dir (same relative path) with one extra key pe
 The harmonic has the same length and dtype (float32) as the segment's wav; the noise target is
 wav - harmonic, so it is not stored. All existing keys are written back unchanged.
 
+Model: hnsep_VR_44.1k_hop512_2024.05.onnx from
+https://github.com/yqzhishen/HarmonicNoiseSeparationGUI/releases/tag/model
+
 The separation runs once on the whole (un-cropped, un-augmented) segment. Pitch augmentation
 (linear-interpolation resampling) and amplitude augmentation are linear, so applying them to
 wav and harmonic separately gives the exact decomposition of the augmented wav.

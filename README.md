@@ -55,7 +55,7 @@
 - **`nhv_v3_3.pth`** — V3/V3X 共有の重み
 - **`nhv_v3_3.onnx` / `nhv_v3_3x.onnx`** — 重み内蔵の単一ファイル ONNX（I/O 契約は `nhv_v3.onnx` / `nhv_v3x.onnx` と同一）
 
-学習レシピは **`config_v3_3.yaml`**。学習データの npz には、先に `tools/add_hnsep_harmonic.py` で hnsep の調波を書き足しておきます（補助の損失を使わない設定では読みません）。
+学習レシピは **`config_v3_3.yaml`**。学習データの npz には、先に `tools/add_hnsep_harmonic.py` で hnsep の調波を書き足しておきます（補助の損失を使わない設定では読みません）。分離モデルの入手先とコマンドは、下の「使い方（V3）」の「hnsep の調波の追加」にあります。
 
 ### V3.2（2026-09）
 
@@ -160,6 +160,14 @@ python preprocess.py --indir <歌唱wavディレクトリ> --out <npz_dir> --con
 > python preprocess.py --indir wavs/eval  --out dataset/test  --config config_v3.yaml
 > ```
 > `config_v3.yaml` の `training.train_dir` / `test_dir` をそれぞれのディレクトリに設定します。`VocoderDataset` はshard（`<sid>|f0` / `|log_melspc` / `|wav`）・単一セグメントのnpzの両方を再帰的に読むので、どちらの形式でも構いません。
+
+**hnsep の調波の追加**（`config_v3_3.yaml` のように hnsep の補助の損失を使う設定のときだけ。使わない設定では不要）:
+分離モデルの ONNX（`hnsep_VR_44.1k_hop512_2024.05.onnx`。謝辞に挙げた yxlllc/vocal-remover の hnsep の ONNX 版）を [yqzhishen/HarmonicNoiseSeparationGUI のリリース](https://github.com/yqzhishen/HarmonicNoiseSeparationGUI/releases/tag/model) から入手し、前処理した学習用の npz に調波を書き足します。GPU を使うときは `onnxruntime` を `onnxruntime-gpu` に入れ替えてください（CPU でも動きます）:
+```bash
+python tools/add_hnsep_harmonic.py --model hnsep_VR_44.1k_hop512_2024.05.onnx \
+    --in_dir dataset/train --out_dir dataset/train_hn
+```
+出力の npz は、元の中身に区間ごとの調波（`<sid>|harmonic`）を足したものです。学習では、config の `training.train_dir` に、この出力先（上の例では `dataset/train_hn`）を書きます。検証用（`test_dir`）のデータには調波は要りません。
 
 **学習**（MRD + MPD GAN。`config_v3.yaml` の `training.train_dir` / `test_dir` / `snapshot_dir` 等を設定）:
 ```bash

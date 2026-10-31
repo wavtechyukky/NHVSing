@@ -55,7 +55,7 @@ Released files in `exported_models/v3_3/` (standard `export.py` outputs, renamed
 - **`nhv_v3_3.pth`** — V3/V3X shared weights
 - **`nhv_v3_3.onnx` / `nhv_v3_3x.onnx`** — self-contained single-file ONNX, same I/O contract as `nhv_v3.onnx` / `nhv_v3x.onnx`
 
-The training recipe is **`config_v3_3.yaml`**. Run `tools/add_hnsep_harmonic.py` on the training npz files first to add the hnsep harmonic (configs without the auxiliary loss never read it).
+The training recipe is **`config_v3_3.yaml`**. Run `tools/add_hnsep_harmonic.py` on the training npz files first to add the hnsep harmonic (configs without the auxiliary loss never read it). Where to get the separation model and the command are under "Add the hnsep harmonic" in Usage (V3) below.
 
 ### V3.2 (2026-09)
 
@@ -160,6 +160,14 @@ python preprocess.py --indir <dir_of_singing_wavs> --out <npz_dir> --config conf
 > python preprocess.py --indir wavs/eval  --out dataset/test  --config config_v3.yaml
 > ```
 > Set `training.train_dir` / `test_dir` in `config_v3.yaml` accordingly. `VocoderDataset` recursively reads both shard npz (`<sid>|f0` / `|log_melspc` / `|wav`) and single-segment npz, so either layout works.
+
+**Add the hnsep harmonic** (only for configs that use the hnsep auxiliary loss, such as `config_v3_3.yaml`; skip it otherwise):
+download the separation model as ONNX (`hnsep_VR_44.1k_hop512_2024.05.onnx`, the ONNX version of the yxlllc/vocal-remover hnsep model credited in the acknowledgements) from the [yqzhishen/HarmonicNoiseSeparationGUI release](https://github.com/yqzhishen/HarmonicNoiseSeparationGUI/releases/tag/model), and add the harmonic to the preprocessed training npz files. To run it on a GPU, replace `onnxruntime` with `onnxruntime-gpu` (it also runs on CPU):
+```bash
+python tools/add_hnsep_harmonic.py --model hnsep_VR_44.1k_hop512_2024.05.onnx \
+    --in_dir dataset/train --out_dir dataset/train_hn
+```
+Each output npz holds the original contents plus each segment's harmonic (`<sid>|harmonic`). For training, set `training.train_dir` in the config to this output directory (`dataset/train_hn` in the example above). The test data (`test_dir`) does not need the harmonic.
 
 **Train** (MRD + MPD GAN; set `training.train_dir` / `test_dir` / `snapshot_dir` in `config_v3.yaml`):
 ```bash
